@@ -36,7 +36,7 @@ tusb_desc_device_t const desc_device = {
 uint8_t const *tud_descriptor_device_cb(void);
 
 // total length of configuration descriptor
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + CFG_TUD_CDC * TUD_CDC_DESC_LEN + TUD_VENDOR_DESC_LEN)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_VENDOR_DESC_LEN)
 
 // configure descriptor (for 2 CDC interfaces)
 uint8_t const desc_configuration[] = {
@@ -48,13 +48,8 @@ uint8_t const desc_configuration[] = {
     // CDC 0: Data Interface
     // TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0_DATA, 4, 0x01, 0x02),
 
-    // CDC 1: Communication Interface - TODO: get 64 from tusb_config.h
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_1, 5, EPNUM_CDC_1_NOTIF, 8, EPNUM_CDC_1_OUT, EPNUM_CDC_1_IN, ENDPOINT_BULK_SIZE),
-    // CDC 1: Data Interface
-    // TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_1_DATA, 4, 0x03, 0x04),
-
     // Vendor (class 0xFF)
-    TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 6, EPNUM_VENDOR_OUT, EPNUM_VENDOR_IN, ENDPOINT_BULK_SIZE),
+    TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 5, EPNUM_VENDOR_OUT, EPNUM_VENDOR_IN, ENDPOINT_BULK_SIZE),
 };
 
 // called when host requests to get configuration descriptor
@@ -78,6 +73,15 @@ tusb_desc_device_qualifier_t const desc_device_qualifier = {
 uint8_t const *tud_descriptor_device_qualifier_cb(void);
 
 // String descriptors referenced with .i... in the descriptor tables
+enum
+{
+    STRID_LANGID = 0,   // 0: supported language ID
+    STRID_MANUFACTURER, // 1: Manufacturer
+    STRID_PRODUCT,      // 2: Product
+    STRID_SERIAL,       // 3: Serials
+    STRID_CDC_0,        // 4: CDC Interface 0
+    STRID_VENDOR,       // 5: Vendor Interface
+};
 
 // array of pointer to string descriptors
 char const *string_desc_arr[] = {
@@ -85,14 +89,10 @@ char const *string_desc_arr[] = {
     (const char[]){0x09, 0x04}, // 0: supported language is English (0x0409)
     "FMTIS GA BODEN",           // 1: Manufacturer
     "RPico2 USB Tester",        // 2: Product
-    "PT-0001",                  // 3: Serials (null so it uses unique ID if available)
+    NULL,                       // 3: Serials (null so it uses unique ID if available)
     "CDC0"                      // 4: CDC Interface 0
-    "CDC1",                     // 5: CDC Interface 1,
-    "Test interface"            // 6: Vendor Interface
+    "Test interface"            // 5: Vendor Interface
 };
-
-// buffer to hold the string descriptor during the request | plus 1 for the null terminator
-static uint16_t _desc_str[32 + 1];
 
 // called when host request to get string descriptor
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid);
@@ -124,6 +124,8 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
     // TODO: check lang id
     (void)langid;
     size_t char_count;
+    static uint16_t _desc_str[32 + 1];
+    const char *str;
 
     // Determine which string descriptor to return
     switch (index)
@@ -148,18 +150,17 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
             return NULL;
         }
 
-        // Copy string descriptor into _desc_str
-        const char *str = string_desc_arr[index];
-
+        str = string_desc_arr[index];
         char_count = strlen(str);
-        size_t const max_count = sizeof(_desc_str) / sizeof(_desc_str[0]) - 1; // -1 for string type
-        // Cap at max char
+
+        // Ensure we don't overwrite the buffer
+        size_t const max_count = (sizeof(_desc_str) / sizeof(_desc_str[0])) - 1;
         if (char_count > max_count)
         {
             char_count = max_count;
         }
 
-        // Convert ASCII string into UTF-16
+        // Convert to UTF-16
         for (size_t i = 0; i < char_count; i++)
         {
             _desc_str[1 + i] = str[i];

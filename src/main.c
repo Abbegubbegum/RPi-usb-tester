@@ -54,39 +54,33 @@ void tud_cdc_rx_cb(uint8_t itf)
     // | you won't be able to print anymore to CDC0
     // | next time this function is called
     uint32_t count = tud_cdc_n_read(itf, buf, sizeof(buf));
+    buf[count] = 0; // null-terminate the string
 
-    // check if the data was received on the second cdc interface
-    if (itf == 1)
-    {
-        // process the received data
-        buf[count] = 0; // null-terminate the string
-        // now echo data back to the console on CDC 0
-        printf("Received on CDC 1: %s\n", buf);
-
-        // and echo back OK on CDC 1
-        tud_cdc_n_write(itf, (uint8_t const *)"OK\r\n", 4);
-        tud_cdc_n_write_flush(itf);
-    }
+    tud_cdc_n_write(itf, (uint8_t const *)"OK\r\n", 4);
+    tud_cdc_n_write_flush(itf);
 }
+
+static uint8_t *rx_buffer[512];
+static uint16_t rx_bufsize;
 
 // VENDOR BULK: echo anything we receive
 void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize)
 {
-    printf("Got something on vendor rx!");
+    // printf("Received 0x%02x bytes of data\n", bufsize);
 
-    if (itf == ITF_NUM_VENDOR)
-    {
-        printf("Received %d bytes of data\n", bufsize);
+    memcpy(rx_buffer, buffer, bufsize);
+    rx_bufsize = bufsize;
 
-        printf("Received on Vendor ITF: %s\n", buffer);
+    // printf("Data: [");
+    // for (int i = 0; i < bufsize; i++)
+    // {
+    //     printf("0x%02x, ", buffer[i]);
+    // }
+    // printf("]\n");
 
-        tud_vendor_write(buffer, bufsize);
-        tud_vendor_flush();
-    }
-    else
-    {
-        printf("Got data on wrong interface: %d\n", itf);
-    }
+    tud_vendor_write(rx_buffer, rx_bufsize);
+    tud_vendor_flush();
+
 #if CFG_TUD_VENDOR_RX_BUFSIZE > 0
     tud_vendor_read_flush();
 #endif
@@ -94,5 +88,5 @@ void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize)
 
 void tud_vendor_tx_cb(uint8_t itf, uint32_t sent_bytes)
 {
-    printf("Sent 0x%02x bytes", sent_bytes);
+    printf("Sent 0x%02x bytes\n", sent_bytes);
 }
