@@ -42,11 +42,11 @@ pico_set_program_version(RPI_LOOPBACK "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(RPI_LOOPBACK 1)
-pico_enable_stdio_usb(RPI_LOOPBACK 1)
+pico_enable_stdio_usb(RPI_LOOPBACK 0)
 
 # Add the standard library to the build
 target_link_libraries(RPI_LOOPBACK
-        pico_stdlib pico_unique_id tinyusb_device tinyusb_board)
+        pico_stdlib pico_unique_id tinyusb_device tinyusb_board pico_multicore)
 
 # Add the standard include files to the build
 target_include_directories(RPI_LOOPBACK PRIVATE

@@ -1,174 +1,115 @@
-/**
- * Copyright (c) 2023 Raspberry Pi (Trading) Ltd.
- *
- * SPDX-License-Identifier: BSD-3-Clause
- */
+//
+// Copyright (c) 2025 Piers Finlayson <piers@piers.rocks>
+//
+// Licensed under MIT license - see https://opensource.org/licenses/MIT
+//
 
-#include <tusb.h>
-#include <bsp/board_api.h>
+//
+// USB descriptor for the tinyusb vendor example 
+//
 
 #include "include.h"
+#include "pico/stdlib.h"
+#include "tusb.h"
+#include "device/usbd.h"
 
-// defines a descriptor that will be communicated to the host
+// Device descriptor.
+// For a vendor device ths is simple. DevicClass is 0xff and SubClass and
+// DeviceProtocol are 0x00.
+// However mixing classes (for example including a CDC as well), you must use
+// TUSB_CLASS_MISC, MISC_SUBCLASS_COMMON and MISC_PROTOCOL_IAD.
 tusb_desc_device_t const desc_device = {
-    .bLength = sizeof(tusb_desc_device_t),
-    .bDescriptorType = TUSB_DESC_DEVICE,
-    .bcdUSB = DEVICE_BCD,
-
-    .bDeviceClass = 0x00,
-    .bDeviceSubClass = 0x00,
-    .bDeviceProtocol = 0x00,
-
-    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE, // 64 bytes
-
-    .idVendor = DEVICE_VID,
-    .idProduct = DEVICE_PID,
-    .bcdDevice = 0x0100, // Device release number
-
-    .iManufacturer = 0x01, // Index of manufacturer string
-    .iProduct = 0x02,      // Index of product string
-    .iSerialNumber = 0x03, // Index of serial number string
-
-    .bNumConfigurations = 0x01 // 1 configuration
+    .bLength            = sizeof(tusb_desc_device_t),
+    .bDescriptorType    = TUSB_DESC_DEVICE,
+    .bcdUSB             = 0x0110,  // USB 1.1
+    .bDeviceClass       = TUSB_CLASS_VENDOR_SPECIFIC,
+    .bDeviceSubClass    = 0x00,
+    .bDeviceProtocol    = 0x00,
+    .bMaxPacketSize0    = MAX_ENDPOINT0_SIZE,
+    .idVendor           = EXAMPLE_VID,
+    .idProduct          = EXAMPLE_PID,
+    .bcdDevice          = 0x0001,
+    .iManufacturer      = STRID_MANUFACTURER,
+    .iProduct           = STRID_PRODUCT,
+    .iSerialNumber      = STRID_SERIAL,
+    .bNumConfigurations = 0x01
 };
 
-// called when host requests to get device descriptor
-uint8_t const *tud_descriptor_device_cb(void);
-
-// total length of configuration descriptor
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + CFG_TUD_CDC * TUD_CDC_DESC_LEN + TUD_VENDOR_DESC_LEN)
-
-// configure descriptor (for 2 CDC interfaces)
-uint8_t const desc_configuration[] = {
-    // config descriptor | how much power in mA, count of interfaces, ...
-    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x80, 100),
-
-    // CDC 0: Communication Interface - TODO: get 64 from tusb_config.h
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0, 4, EPNUM_CDC_0_NOTIF, 8, EPNUM_CDC_0_OUT, EPNUM_CDC_0_IN, ENDPOINT_BULK_SIZE),
-    // CDC 0: Data Interface
-    // TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0_DATA, 4, 0x01, 0x02),
-
-    // CDC 1: Communication Interface - TODO: get 64 from tusb_config.h
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_1, 5, EPNUM_CDC_1_NOTIF, 8, EPNUM_CDC_1_OUT, EPNUM_CDC_1_IN, ENDPOINT_BULK_SIZE),
-    // CDC 1: Data Interface
-    // TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_1_DATA, 4, 0x03, 0x04),
-
-    // Vendor (class 0xFF)
-    TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 6, EPNUM_VENDOR_OUT, EPNUM_VENDOR_IN, ENDPOINT_BULK_SIZE),
-};
-
-// called when host requests to get configuration descriptor
-uint8_t const *tud_descriptor_configuration_cb(uint8_t index);
-
-// more device descriptor this time the qualifier
-tusb_desc_device_qualifier_t const desc_device_qualifier = {
-    .bLength = sizeof(tusb_desc_device_t),
-    .bDescriptorType = TUSB_DESC_DEVICE,
-    .bcdUSB = DEVICE_BCD,
-
-    .bDeviceClass = 0x00,
-    .bDeviceSubClass = 0x00,
-    .bDeviceProtocol = 0x00,
-
-    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
-    .bNumConfigurations = 0x01,
-    .bReserved = 0x00};
-
-// called when host requests to get device qualifier descriptor
-uint8_t const *tud_descriptor_device_qualifier_cb(void);
-
-// String descriptors referenced with .i... in the descriptor tables
-
-// array of pointer to string descriptors
-char const *string_desc_arr[] = {
-    // switched because board is little endian
-    (const char[]){0x09, 0x04}, // 0: supported language is English (0x0409)
-    "FMTIS GA BODEN",           // 1: Manufacturer
-    "RPico2 USB Tester",        // 2: Product
-    "PT-0001",                  // 3: Serials (null so it uses unique ID if available)
-    "CDC0"                      // 4: CDC Interface 0
-    "CDC1",                     // 5: CDC Interface 1,
-    "Test interface"            // 6: Vendor Interface
-};
-
-// buffer to hold the string descriptor during the request | plus 1 for the null terminator
-static uint16_t _desc_str[32 + 1];
-
-// called when host request to get string descriptor
-uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid);
-
-// --------------------------------------------------------------------+
-// IMPLEMENTATION
-// --------------------------------------------------------------------+
-
-uint8_t const *tud_descriptor_device_cb(void)
-{
+// Callback which is invoked when GET DEVICE DESCRIPTOR is received
+uint8_t const* tud_descriptor_device_cb(void) {
     return (uint8_t const *)&desc_device;
 }
 
-uint8_t const *tud_descriptor_device_qualifier_cb(void)
-{
-    return (uint8_t const *)&desc_device_qualifier;
-}
+// Configuration descriptor
+// Just need the TUD_CONFIG_DESCRIPTOR, and a TUD_VENDOR_DESCRIPTOR
+// You can add other descriptors here if you mix classes (e.g. add
+// a CDC descriptor as well to add a communications device)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN)
+uint8_t static desc_configuration[] = {
+    // Configuration descriptor
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x80, 100),
 
-uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
-{
-    // avoid unused parameter warning and keep function signature consistent
-    (void)index;
+    TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 0, BULK_OUT_ENDPOINT_DIR, BULK_IN_ENDPOINT_DIR, ENDPOINT_BULK_SIZE),
+};
+
+// String descriptors
+char const* string_desc_arr[] = {
+    [STRID_LANGID]      = (const char[]) { 0x09, 0x04 },  // Supported language ID - English (US)
+    [STRID_MANUFACTURER] = MANUFACTURER,
+    [STRID_PRODUCT]      = PRODUCT,
+    [STRID_SERIAL]       = SERIAL,
+};
+
+// Callback invoked when GET CONFIGURATION DESCRIPTOR is received
+uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
+    (void) index;
+    static_assert(sizeof(desc_configuration) == CONFIG_TOTAL_LEN, "Configuration descriptor size mismatch");
 
     return desc_configuration;
 }
 
-uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
-{
-    // TODO: check lang id
-    (void)langid;
-    size_t char_count;
 
-    // Determine which string descriptor to return
-    switch (index)
-    {
-    case STRID_LANGID:
-        memcpy(&_desc_str[1], string_desc_arr[STRID_LANGID], 2);
-        char_count = 1;
-        break;
+// Callback invoked when GET STRING DESCRIPTOR is received.
+// Of course, you can decide to supply dynamically calculated values here,
+// although those changing over time may cause problems with OSes that have
+// cached the values for your VID/PID pair.
+uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
+    static uint16_t _desc_str[32 + 1];
+    (void) langid;
+    size_t chr_count;
+    const char *str;
 
-    case STRID_SERIAL:
-        // try to read the serial from the board
-        char_count = board_usb_get_serial(_desc_str + 1, 32);
-        break;
+    switch (index) {
+        case STRID_LANGID:
+            memcpy(&_desc_str[1], string_desc_arr[0], 2);
+            chr_count = 1;
+            break;
 
-    default:
-        // COPYRIGHT NOTE: Based on TinyUSB example
-        // Windows wants utf16le
+        case STRID_SERIAL:
+        case STRID_MANUFACTURER:
+        case STRID_PRODUCT:
+            str = string_desc_arr[index];
+            chr_count = strlen(str);
 
-        // Determine which string descriptor to return
-        if (!(index < sizeof(string_desc_arr) / sizeof(string_desc_arr[0])))
-        {
+            // Ensure we don't overwrite the buffer
+            size_t const max_count = (sizeof(_desc_str) / sizeof(_desc_str[0])) - 1;
+            if (chr_count > max_count) 
+            {
+                chr_count = max_count;
+            }
+
+            // Convert to UTF-16
+            for (size_t ii = 0; ii < chr_count; ii++) {
+                _desc_str[1 + ii] = str[ii];
+            }
+            break;
+            
+        default:
             return NULL;
-        }
-
-        // Copy string descriptor into _desc_str
-        const char *str = string_desc_arr[index];
-
-        char_count = strlen(str);
-        size_t const max_count = sizeof(_desc_str) / sizeof(_desc_str[0]) - 1; // -1 for string type
-        // Cap at max char
-        if (char_count > max_count)
-        {
-            char_count = max_count;
-        }
-
-        // Convert ASCII string into UTF-16
-        for (size_t i = 0; i < char_count; i++)
-        {
-            _desc_str[1 + i] = str[i];
-        }
-        break;
     }
 
-    // First byte is the length (including header), second byte is string type
-    _desc_str[0] = (uint16_t)((TUSB_DESC_STRING << 8) | (char_count * 2 + 2));
+    // first byte is length (including header), second byte is string type
+    _desc_str[0] = (uint16_t) ((TUSB_DESC_STRING << 8) | (2 * chr_count + 2));
 
     return _desc_str;
 }
