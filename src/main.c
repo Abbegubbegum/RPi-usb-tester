@@ -12,8 +12,11 @@
 
 #include "include.h"
 
-static uint8_t vnd_buf[512];
-static uint16_t vnd_bufsize;
+static uint8_t vnd_buffer[1512];
+static uint16_t vnd_buflen = 0;
+static uint16_t expected_packet_size = 0;
+
+void service_vendor();
 
 int main(void)
 {
@@ -35,6 +38,8 @@ int main(void)
     {
         // TinyUSB device task | must be called regularly
         tud_task();
+
+        service_vendor();
     }
 
     // indicate no error
@@ -63,27 +68,63 @@ void tud_cdc_rx_cb(uint8_t itf)
 // VENDOR BULK: echo anything we receive
 void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize)
 {
-    printf("Received 0x%02x bytes of data\n", bufsize);
+    // printf("Received 0x%02x bytes of data\n", bufsize);
 
-    memcpy(vnd_buf, buffer, bufsize);
-    vnd_bufsize = bufsize;
+    //     memcpy(vnd_buffer, buffer, bufsize);
+    //     vnd_bufsize = bufsize;
 
-    // printf("Data: [");
-    // for (int i = 0; i < bufsize; i++)
-    // {
-    //     printf("0x%02x, ", buffer[i]);
-    // }
-    // printf("]\n");
+    //     // printf("Data: [");
+    //     // for (int i = 0; i < bufsize; i++)
+    //     // {
+    //     //     printf("0x%02x, ", buffer[i]);
+    //     // }
+    //     // printf("]\n");
 
-    tud_vendor_write(vnd_buf, vnd_bufsize);
-    tud_vendor_flush();
+    //     tud_vendor_write(vnd_buffer, vnd_bufsize);
+    //     tud_vendor_flush();
 
-#if CFG_TUD_VENDOR_RX_BUFSIZE > 0
-    tud_vendor_read_flush();
-#endif
+    // #if CFG_TUD_VENDOR_RX_BUFSIZE > 0
+    //     tud_vendor_read_flush();
+    // #endif
 }
 
 void tud_vendor_tx_cb(uint8_t itf, uint32_t sent_bytes)
 {
-    printf("Sent 0x%02x bytes\n", sent_bytes);
+    // printf("Sent 0x%04x bytes\n", sent_bytes);
+}
+
+void service_vendor()
+{
+    while (tud_vendor_available())
+    {
+        // Read as much data as we can into the vnd_buffer
+        uint32_t count = tud_vendor_read(vnd_buffer + vnd_buflen, sizeof(vnd_buffer) - vnd_buflen);
+        vnd_buflen += count;
+
+        // If we have not parsed a header yet and have enough bits in the buffer
+        if (expected_packet_size == 0 && vnd_buflen >= 6)
+        {
+            // printf("Parsing header: ");
+            // Parse little endian
+            uint32_t seq = (uint32_t)vnd_buffer[0] | ((uint32_t)vnd_buffer[1] << 8) |
+                           ((uint32_t)vnd_buffer[2] << 16) | ((uint32_t)vnd_buffer[3] << 24);
+            uint16_t len = (uint16_t)vnd_buffer[4] | ((uint16_t)vnd_buffer[5] << 8);
+
+            // printf("seq: %d, size: %d\n", seq, len);
+
+            expected_packet_size = (uint32_t)len;
+        }
+
+        if (expected_packet_size && vnd_buflen >= expected_packet_size)
+        {
+            // printf("Received enough bytes, sending packet\n");
+            tud_vendor_write(vnd_buffer, expected_packet_size);
+            tud_vendor_flush();
+
+            uint32_t remain = vnd_buflen - expected_packet_size;
+            memmove(vnd_buffer, vnd_buffer + vnd_buflen, remain);
+            vnd_buflen = remain;
+            expected_packet_size = 0;
+        }
+    }
 }

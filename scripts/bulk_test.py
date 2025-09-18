@@ -44,7 +44,7 @@ if ep_out is None or ep_in is None:
     sys.exit("Vendor endpoints not found")
 
 # Test parameters
-pkt = 64
+pkt = 1024
 secs = 3.0       # test duration
 deadline = time.time() + secs
 seq = 0
@@ -52,24 +52,30 @@ sent = 0
 got = 0
 errors = 0
 
+header_size = 6
 
-def make_packet(n, seq):
-    # simple header: [u32 seq][payload...pattern]
-    hdr = struct.pack("<I", seq)
-    body = bytes((i & 0xFF for i in range(n - 4)))
+
+def make_packet(size, seq):
+    # simple header: [u32 seq][u16 len][payload...pattern]
+    hdr = struct.pack("<IH", seq, size)
+    body = bytes((i & 0xFF for i in range(size - header_size)))
     return hdr + body
 
 
-def check_packet(b):
-    if (len(b) < pkt):
-        return 0, False
+def check_packet(bytes):
+    if (len(bytes) < 6):
+        return [0], False
 
-    nonlocal_seq = struct.unpack("<I", b[:4])[0]
+    echo_header = struct.unpack("<IH", bytes[:header_size])
+
+    if (len(bytes) < pkt):
+        return echo_header, False
+
     # quick pattern check
-    for idx, v in enumerate(b[4:]):
+    for idx, v in enumerate(bytes[header_size:]):
         if v != (idx & 0xFF):
-            return nonlocal_seq, False
-    return nonlocal_seq, True
+            return echo_header, False
+    return echo_header, True
 
 
 # Prime and run
@@ -84,13 +90,14 @@ while time.time() < deadline:
     # Small errors where it randomly sends 0 bytes
     if (len(echo) == 0):
         echo = ep_in.read(pkt, timeout=2000).tobytes()
-    rseq, ok = check_packet(echo)
-    if not ok or rseq != seq:
+
+    echo_header, ok = check_packet(echo)
+    if not ok or echo_header[0] != seq:
         print("sent")
         print(buf)
         print("received")
         print(echo)
-        print("Error: {ok}, {rseq}")
+        print("Error: {}, {}".format(ok, echo_header))
         errors += 1
     got += len(echo)
     seq += 1
