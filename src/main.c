@@ -12,8 +12,8 @@
 
 #include "include.h"
 
-static uint8_t vnd_rx_buf[512];
-static uint8_t vnd_tx_buf[512];
+static uint8_t vnd_buf[512];
+static uint16_t vnd_bufsize;
 
 int main(void)
 {
@@ -55,21 +55,18 @@ void tud_cdc_rx_cb(uint8_t itf)
     // | next time this function is called
     uint32_t count = tud_cdc_n_read(itf, buf, sizeof(buf));
     buf[count] = 0; // null-terminate the string
-
+    printf("%s\n", buf);
     tud_cdc_n_write(itf, (uint8_t const *)"OK\r\n", 4);
     tud_cdc_n_write_flush(itf);
 }
 
-static uint8_t *rx_buffer[512];
-static uint16_t rx_bufsize;
-
 // VENDOR BULK: echo anything we receive
 void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize)
 {
-    // printf("Received 0x%02x bytes of data\n", bufsize);
+    printf("Received 0x%02x bytes of data\n", bufsize);
 
-    memcpy(rx_buffer, buffer, bufsize);
-    rx_bufsize = bufsize;
+    memcpy(vnd_buf, buffer, bufsize);
+    vnd_bufsize = bufsize;
 
     // printf("Data: [");
     // for (int i = 0; i < bufsize; i++)
@@ -78,7 +75,7 @@ void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize)
     // }
     // printf("]\n");
 
-    tud_vendor_write(rx_buffer, rx_bufsize);
+    tud_vendor_write(vnd_buf, vnd_bufsize);
     tud_vendor_flush();
 
 #if CFG_TUD_VENDOR_RX_BUFSIZE > 0

@@ -7,7 +7,7 @@ import struct
 import random
 
 
-VID = 0xCafe
+VID = 0x1209
 PID = 0x4004
 
 dev = usb.core.find(idVendor=VID, idProduct=PID)
@@ -44,7 +44,7 @@ if ep_out is None or ep_in is None:
     sys.exit("Vendor endpoints not found")
 
 # Test parameters
-pkt = 64       # bytes per transfer (<= 64*multiple is fine; driver splits)
+pkt = 64
 secs = 3.0       # test duration
 deadline = time.time() + secs
 seq = 0

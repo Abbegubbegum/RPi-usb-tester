@@ -19,7 +19,7 @@ tusb_desc_device_t const desc_device = {
     .bDeviceSubClass = 0x00,
     .bDeviceProtocol = 0x00,
 
-    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE, // 64 bytes
+    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
 
     .idVendor = DEVICE_VID,
     .idProduct = DEVICE_PID,
@@ -44,7 +44,7 @@ uint8_t const desc_configuration[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x80, 100),
 
     // CDC 0: Communication Interface - TODO: get 64 from tusb_config.h
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0, 4, EPNUM_CDC_0_NOTIF, 8, EPNUM_CDC_0_OUT, EPNUM_CDC_0_IN, ENDPOINT_BULK_SIZE),
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0, 4, EPNUM_CDC_0_NOTIF, 8, EPNUM_CDC_0_OUT, EPNUM_CDC_0_IN, 64),
     // CDC 0: Data Interface
     // TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0_DATA, 4, 0x01, 0x02),
 

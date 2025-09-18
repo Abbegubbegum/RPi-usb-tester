@@ -1,12 +1,10 @@
 // set some example Vendor and Product ID
 // the board will use to identify at the host
-#define DEVICE_VID 0xCafe
-// use _PID_MAP to generate unique PID for each interface
-#define DEVICE_PID (0x4004)
+#define DEVICE_VID 0x1209 // Generic
+#define DEVICE_PID 0x4004
 // set USB 2.0
 #define DEVICE_BCD 0x0200
 
-#define MAX_ENDPOINT0_SIZE 64
 #define ENDPOINT_BULK_SIZE 64
 
 enum
