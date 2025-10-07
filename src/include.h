@@ -1,3 +1,4 @@
+// ---------- USB STUFF ----------
 // set some example Vendor and Product ID
 // the board will use to identify at the host
 #define DEVICE_VID 0x1209 // Generic
@@ -22,3 +23,13 @@ enum
 
 #define EPNUM_VENDOR_OUT 0x05
 #define EPNUM_VENDOR_IN 0x85
+
+// ------------------------
+
+#define USB_MUX_SEL_PIN 20
+
+#define UART_ID uart0
+#define BAUD_RATE 115200
+
+#define UART_TX_PIN 0
+#define UART_RX_PIN 1

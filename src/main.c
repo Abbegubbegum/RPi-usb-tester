@@ -1,14 +1,12 @@
-/**
- * Copyright (c) 2024 Raspberry Pi (Trading) Ltd.
- *
- * SPDX-License-Identifier: BSD-3-Clause
- */
-
 #include <stdlib.h>
 #include <bsp/board_api.h>
 #include <tusb.h>
 
 #include <pico/stdio.h>
+#include <pico/stdlib.h>
+
+#include <hardware/uart.h>
+#include <hardware/irq.h>
 
 #include "include.h"
 
@@ -17,6 +15,30 @@ static uint16_t vnd_buflen = 0;
 static uint16_t expected_packet_size = 0;
 
 void service_vendor();
+void on_uart_rx();
+
+static void init_gpio()
+{
+    // Initialize the GPIO pin for USB mux selection
+    gpio_init(USB_MUX_SEL_PIN);
+    gpio_set_dir(USB_MUX_SEL_PIN, GPIO_OUT);
+    gpio_put(USB_MUX_SEL_PIN, 1);
+}
+
+static void init_uart()
+{
+    // Set up UART
+    uart_init(UART_ID, BAUD_RATE);
+    gpio_set_function(UART_TX_PIN, UART_FUNCSEL_NUM(UART_ID, UART_TX_PIN));
+    gpio_set_function(UART_RX_PIN, UART_FUNCSEL_NUM(UART_ID, UART_RX_PIN));
+
+    // Set up an interrupt on RX
+    irq_set_exclusive_handler(UART0_IRQ, on_uart_rx);
+    irq_set_enabled(UART0_IRQ, true);
+    uart_set_irq_enables(UART_ID, true, false);
+
+    uart_puts(UART_ID, "\nUART initialized\n");
+}
 
 int main(void)
 {
@@ -30,9 +52,8 @@ int main(void)
         board_init_after_tusb();
     }
 
-    // let pico sdk use the first cdc interface for std io
-    stdio_init_all();
-
+    init_gpio();
+    init_uart();
     // main run loop
     while (1)
     {
@@ -52,16 +73,15 @@ void tud_cdc_rx_cb(uint8_t itf)
     // allocate buffer for the data in the stack
     uint8_t buf[CFG_TUD_CDC_RX_BUFSIZE];
 
-    printf("RX CDC %d\n", itf);
-
     // read the available data
     // | IMPORTANT: also do this for CDC0 because otherwise
     // | you won't be able to print anymore to CDC0
     // | next time this function is called
     uint32_t count = tud_cdc_n_read(itf, buf, sizeof(buf));
     buf[count] = 0; // null-terminate the string
-    printf("%s\n", buf);
-    tud_cdc_n_write(itf, (uint8_t const *)"OK\r\n", 4);
+    tud_cdc_n_write(itf, (uint8_t const *)"RX: ", 4);
+    tud_cdc_n_write(itf, buf, count);
+    tud_cdc_n_write(itf, (uint8_t const *)"\n", 1);
     tud_cdc_n_write_flush(itf);
 }
 
@@ -125,6 +145,27 @@ void service_vendor()
             memmove(vnd_buffer, vnd_buffer + vnd_buflen, remain);
             vnd_buflen = remain;
             expected_packet_size = 0;
+        }
+    }
+}
+
+void on_uart_rx()
+{
+    if (uart_is_readable(UART_ID))
+    {
+        uint8_t ch = uart_getc(UART_ID);
+        // Echo back the received character
+        uart_putc(UART_ID, ch);
+
+        if (ch == '1')
+        {
+            gpio_put(USB_MUX_SEL_PIN, 1);
+            uart_puts(UART_ID, "USB MUX set to 1\n");
+        }
+        else if (ch == '0')
+        {
+            gpio_put(USB_MUX_SEL_PIN, 0);
+            uart_puts(UART_ID, "USB MUX set to 0\n");
         }
     }
 }
