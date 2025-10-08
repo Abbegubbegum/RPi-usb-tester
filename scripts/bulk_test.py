@@ -1,152 +1,222 @@
+
 import usb.core
 import usb.util
 import time
 import sys
-import os
 import struct
-import random
+import os
 
-
+# ---------------------- Config ----------------------
 VID = 0x1209
 PID = 0x4004
 
+# Request IDs (match your firmware)
+REQ_GET_PORT = 0x01  # IN:  u8 port
+REQ_SET_PORT = 0x02  # OUT: wValue = port
+REQ_GET_POWER = 0x03  # IN:  TBD (not used here)
+REQ_GET_PORTMAP = 0x10  # IN:  u8 port_map (bitmask of available ports)
 
-def get_device():
+TEST_SECS = 3.0
+PKT_SIZE = 8        # total packet size including header
+TIMEOUT_MS = 1000
+
+# ---------------------- USB helpers ----------------------
+
+
+def find_device():
     dev = usb.core.find(idVendor=VID, idProduct=PID)
     if dev is None:
-        sys.exit("Device not found")
+        raise RuntimeError(
+            "Device not found (VID=0x%04X, PID=0x%04X)" % (VID, PID))
+    # Select a configuration but don't auto-claim interfaces; PyUSB does lazy claims
+    try:
+        dev.set_configuration()
+    except usb.core.USBError:
+        pass
     return dev
 
 
-def get_vendor_interface(dev):
-
-    # for cfg in dev:
-    #     for intf in cfg:
-    #         if dev.is_kernel_driver_active(intf.bInterfaceNumber):
-    # print("KERNEL DRIVER IS ACTIVE?")
-    # print(intf)
-    # try:
-    # dev.detach_kernel_driver(intf.bInterfaceNumber)
-    # except Exception:
-    #     pass
-    # dev.set_configuration()
-    cfg = dev.get_active_configuration()
-
-    intf = None
-    for i in cfg:
-        if i.bInterfaceClass == 0xFF:
-            intf = i
-            break
-    if intf is None:
-        sys.exit("No vendor interface (class 0xFF) found")
-    return intf
+def find_vendor_interface(dev):
+    for cfg in dev:
+        for intf in cfg:
+            if intf.bInterfaceClass == 0xFF:  # vendor
+                return intf
+    raise RuntimeError("No vendor interface (class 0xFF) found")
 
 
-def get_endpoints(intf):
+def ctrl_in(dev, req, length, intf_num):
+    # Try interface recipient (0xC1) first if intf_num is provided, otherwise device recipient (0xC0)
+
+    return dev.ctrl_transfer(0xC1, req, 0, intf_num, length, timeout=TIMEOUT_MS)
+
+
+def ctrl_out(dev, req, intf_num, wValue=0):
+
+    dev.ctrl_transfer(0x41, req, wValue, intf_num,
+                      None, timeout=TIMEOUT_MS)
+
+# ---------------------- Maps & port selection ----------------------
+
+
+def try_get_map(dev, intf_num):
+    data = bytes(ctrl_in(dev, REQ_GET_PORTMAP, 1, intf_num))
+    if len(data) != 1:
+        raise RuntimeError("Map request returned wrong length")
+
+    return data[0]
+
+
+def build_ports_from_map(map_val):
+    # size of map_val is 1 byte, so max 8 ports
+    ports = [i for i in range(8) if (map_val >> i) & 1]
+    return ports
+
+
+def get_ports_to_test(dev):
+    intf_num = find_vendor_interface(dev).bInterfaceNumber
+
+    # First prefer ENUM map (actual data path works)
+
+    port_map = try_get_map(dev, intf_num)
+    ports = build_ports_from_map(port_map)
+    return ports
+
+
+def set_port_and_reopen(dev, intf_num, port):
+    ctrl_out(dev, REQ_SET_PORT, intf_num, port)
+    # After a port switch the device may have re-enumerated, so refind it
+    time.sleep(1)  # brief settle
+    dev = find_device()
+    intf_num = find_vendor_interface(dev).bInterfaceNumber
+    return dev
+
+# ---------------------- Bulk loopback test ----------------------
+
+
+def find_bulk_eps(dev):
+    intf = find_vendor_interface(dev)
+    # Expect one BULK OUT and one BULK IN
     ep_out = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(
-        e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
+        e.bEndpointAddress) == usb.util.ENDPOINT_OUT and usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK)
     ep_in = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(
-        e.bEndpointAddress) == usb.util.ENDPOINT_IN)
+        e.bEndpointAddress) == usb.util.ENDPOINT_IN and usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK)
     if ep_out is None or ep_in is None:
-        sys.exit("Vendor endpoints not found")
+        raise RuntimeError("Could not find bulk endpoints on vendor interface")
     return ep_out, ep_in
 
 
-def get_port(dev):
-    bmRequestType = 0xC0
-    request = 0x01
-
-    # Try interface-recipient first (most likely for tud_vendor_control_xfer_cb)
-    return int(dev.ctrl_transfer(bmRequestType, request, 0, 0, 1)[0])
+HEADER_SIZE = 6  # <u32 seq><u16 len>
 
 
-def set_port(dev, port):
-    bmRequestType = 0x40
-    request = 0x03
-    dev.ctrl_transfer(bmRequestType, request, port, 0, None)
+def make_packet(total_size, seq):
+    if total_size < HEADER_SIZE:
+        total_size = HEADER_SIZE
+    hdr = struct.pack("<IH", seq, total_size)
+    # Payload pattern: incremental bytes 0..255 repeating
+    payload = bytes((i & 0xFF for i in range(total_size - HEADER_SIZE)))
+    return hdr + payload
 
 
-# Test parameters
-pkt = 1024
-secs = 3.0       # test duration
-deadline = time.time() + secs
-seq = 0
-sent = 0
-got = 0
-errors = 0
-
-header_size = 6
-
-
-def make_packet(size, seq):
-    # simple header: [u32 seq][u16 len][payload...pattern]
-    hdr = struct.pack("<IH", seq, size)
-    body = bytes((i & 0xFF for i in range(size - header_size)))
-    return hdr + body
+def check_echo(buf, expected_seq, expected_len):
+    if len(buf) < HEADER_SIZE:
+        return False, "short echo"
+    seq, ln = struct.unpack("<IH", buf[:HEADER_SIZE])
+    if seq != expected_seq or ln != expected_len:
+        return False, f"header mismatch seq={seq} len={ln} expected seq={expected_seq} len={expected_len}"
+    if len(buf) != expected_len:
+        return False, "USB len mismatch"
+    # Verify payload pattern
+    for i, b in enumerate(buf[HEADER_SIZE:]):
+        if b != (i & 0xFF):
+            return False, f"payload mismatch at {i}"
+    return True, ""
 
 
-def check_packet(bytes):
-    if (len(bytes) < 6):
-        return [0], False
+def run_bulk_test(dev, duration_s=TEST_SECS, pkt_size=PKT_SIZE):
+    ep_out, ep_in = find_bulk_eps(dev)
 
-    echo_header = struct.unpack("<IH", bytes[:header_size])
+    # Prime: flush any stale IN data
+    try:
+        while True:
+            data = ep_in.read(512, timeout=5)
+            if not data:
+                break
+    except usb.core.USBError:
+        pass
 
-    if (len(bytes) < pkt):
-        return echo_header, False
+    deadline = time.time() + duration_s
+    seq = 0
+    sent = 0
+    got = 0
+    errors = 0
 
-    # quick pattern check
-    for idx, v in enumerate(bytes[header_size:]):
-        if v != (idx & 0xFF):
-            return echo_header, False
-    return echo_header, True
+    while time.time() < deadline:
+        pkt = make_packet(pkt_size, seq)
+        try:
+            wrote = ep_out.write(pkt, timeout=TIMEOUT_MS)
+            sent += wrote
+        except usb.core.USBError:
+            errors += 1
+            continue
 
+        try:
+            echo = bytes(ep_in.read(pkt_size, timeout=TIMEOUT_MS))
+            ok, why = check_echo(echo, seq, pkt_size)
+            if not ok:
+                errors += 1
+            else:
+                got += len(echo)
+        except usb.core.USBError:
+            errors += 1
 
-dev = get_device()
-intf = get_vendor_interface(dev)
-ep_out, ep_in = get_endpoints(intf)
-current_port = get_port(dev)
-print("Current USB MUX port:", current_port)
+        seq += 1
 
+    bps = got / duration_s
+    return {
+        "bytes_sent": sent,
+        "bytes_rcvd": got,
+        "seconds": duration_s,
+        "throughput_Bps": bps,
+        "throughput_Mbps": (bps * 8) / 1e6,
+        "errors": errors
+    }
 
-# Prime and run
-
-while time.time() < deadline:
-    buf = make_packet(pkt, seq)
-    ep_out.write(buf, timeout=1000)
-    sent += 1 * pkt
-    # read echo for last write
-    echo = ep_in.read(pkt, timeout=2000).tobytes()
-
-    # Small errors where it randomly sends 0 bytes
-    if (len(echo) == 0):
-        echo = ep_in.read(pkt, timeout=2000).tobytes()
-
-    echo_header, ok = check_packet(echo)
-    if not ok or echo_header[0] != seq:
-        print("sent")
-        print(buf)
-        print("received")
-        print(echo)
-        print("Error: {}, {}".format(ok, echo_header))
-        errors += 1
-    got += len(echo)
-    seq += 1
-
-
-# drain if last echo
-try:
-    echo = ep_in.read(pkt, timeout=1000).tobytes()
-    got += len(echo)
-except usb.core.USBError:
-    pass
+# ---------------------- Main ----------------------
 
 
-bps = got / secs
-print({
-    "bytes_sent": sent,
-    "bytes_rcvd": got,
-    "seconds": secs,
-    "throughput_Bps": bps,
-    "throughput_Mbps": (bps * 8) / 1e6,
-    "errors": errors
-})
+def main():
+    dev = find_device()
+    intf_num = find_vendor_interface(dev).bInterfaceNumber
+
+    ports = get_ports_to_test(dev)
+    if not ports:
+        print({"error": "no ports detected"})
+        return
+
+    results = []
+    for p in ports:
+        # Switch to port p
+        dev = set_port_and_reopen(dev, intf_num, p)
+        # Run bulk loopback on this path
+        res = run_bulk_test(dev, duration_s=TEST_SECS, pkt_size=PKT_SIZE)
+        res["port"] = p
+        # Optionally query device for reported active port
+        try:
+            port_echo = ctrl_in(dev, REQ_GET_PORT, 1, intf_num)[0]
+            res["device_port_echo"] = int(port_echo)
+        except usb.core.USBError:
+            res["device_port_echo"] = None
+        results.append(res)
+        # Small pause between ports
+        time.sleep(0.05)
+
+    # Print a compact summary
+    summary = {
+        "tested_ports": ports,
+        "per_port": results
+    }
+    print(summary)
+
+
+if __name__ == "__main__":
+    main()

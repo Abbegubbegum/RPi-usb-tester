@@ -33,3 +33,15 @@ enum
 
 #define UART_TX_PIN 0
 #define UART_RX_PIN 1
+
+#define MAX_PORTS 2
+
+#define PORT_0_VBUS_SENSE_PIN 14
+#define PORT_1_VBUS_SENSE_PIN 15
+
+#define CMD_BUFFER_SIZE 32
+
+#define VREF_MV 3300
+#define ADC_MAX 4095
+// DIV R1 = 180k, R2 = 68k
+#define DIV_RATIO_X100 ((180 + 68) / 68) * 100
