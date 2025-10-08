@@ -10,38 +10,61 @@ import random
 VID = 0x1209
 PID = 0x4004
 
-dev = usb.core.find(idVendor=VID, idProduct=PID)
-if dev is None:
-    sys.exit("Device not found")
 
-# for cfg in dev:
-#     for intf in cfg:
-#         if dev.is_kernel_driver_active(intf.bInterfaceNumber):
+def get_device():
+    dev = usb.core.find(idVendor=VID, idProduct=PID)
+    if dev is None:
+        sys.exit("Device not found")
+    return dev
+
+
+def get_vendor_interface(dev):
+
+    # for cfg in dev:
+    #     for intf in cfg:
+    #         if dev.is_kernel_driver_active(intf.bInterfaceNumber):
     # print("KERNEL DRIVER IS ACTIVE?")
     # print(intf)
     # try:
     # dev.detach_kernel_driver(intf.bInterfaceNumber)
     # except Exception:
     #     pass
+    # dev.set_configuration()
+    cfg = dev.get_active_configuration()
 
-# dev.set_configuration()
-cfg = dev.get_active_configuration()
+    intf = None
+    for i in cfg:
+        if i.bInterfaceClass == 0xFF:
+            intf = i
+            break
+    if intf is None:
+        sys.exit("No vendor interface (class 0xFF) found")
+    return intf
 
-intf = None
-for i in cfg:
-    if i.bInterfaceClass == 0xFF:
-        intf = i
-        break
 
-if intf is None:
-    sys.exit("No vendor interface (class 0xFF) found")
+def get_endpoints(intf):
+    ep_out = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(
+        e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
+    ep_in = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(
+        e.bEndpointAddress) == usb.util.ENDPOINT_IN)
+    if ep_out is None or ep_in is None:
+        sys.exit("Vendor endpoints not found")
+    return ep_out, ep_in
 
-ep_out = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(
-    e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
-ep_in = usb.util.find_descriptor(intf, custom_match=lambda e: usb.util.endpoint_direction(
-    e.bEndpointAddress) == usb.util.ENDPOINT_IN)
-if ep_out is None or ep_in is None:
-    sys.exit("Vendor endpoints not found")
+
+def get_port(dev):
+    bmRequestType = 0xC0
+    request = 0x01
+
+    # Try interface-recipient first (most likely for tud_vendor_control_xfer_cb)
+    return int(dev.ctrl_transfer(bmRequestType, request, 0, 0, 1)[0])
+
+
+def set_port(dev, port):
+    bmRequestType = 0x40
+    request = 0x03
+    dev.ctrl_transfer(bmRequestType, request, port, 0, None)
+
 
 # Test parameters
 pkt = 1024
@@ -76,6 +99,13 @@ def check_packet(bytes):
         if v != (idx & 0xFF):
             return echo_header, False
     return echo_header, True
+
+
+dev = get_device()
+intf = get_vendor_interface(dev)
+ep_out, ep_in = get_endpoints(intf)
+current_port = get_port(dev)
+print("Current USB MUX port:", current_port)
 
 
 # Prime and run

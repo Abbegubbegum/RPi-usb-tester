@@ -15,6 +15,8 @@ static uint8_t vnd_buffer[1512];
 static uint16_t vnd_buflen = 0;
 static uint16_t expected_packet_size = 0;
 
+static uint8_t usb_selected_port = 0;
+
 void service_vendor();
 void on_uart_rx();
 
@@ -68,6 +70,25 @@ int main(void)
     return 0;
 }
 
+void usb_switch_to_port(uint8_t port)
+{
+    if (port > 1)
+        return; // Invalid port
+
+    tud_disconnect();
+    sleep_ms(3); // Wait for host to notice disconnection
+
+    gpio_put(USB_MUX_SEL_PIN, port);
+
+    sleep_ms(5); // Wait for the mux to switch
+    tud_connect();
+
+    uart_puts(UART_ID, "Switched USB MUX to port ");
+    uart_putc(UART_ID, '0' + port);
+    uart_puts(UART_ID, "\n");
+    usb_selected_port = port;
+}
+
 // callback when data is received on a CDC interface
 void tud_cdc_rx_cb(uint8_t itf)
 {
@@ -112,6 +133,55 @@ void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize)
 void tud_vendor_tx_cb(uint8_t itf, uint32_t sent_bytes)
 {
     // printf("Sent 0x%04x bytes\n", sent_bytes);
+}
+
+// Protocol:
+// 0x01 - GET_PORT
+// 0x02 - GET_POWER
+// 0x03 - SET_PORT <port>
+bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *request)
+{
+    if (stage != CONTROL_STAGE_SETUP)
+        return true; // only handle setup stage
+
+    char print1[32];
+    snprintf(print1, sizeof(print1), "Vendor control request: 0x%02x", request->bRequest);
+    char print2[32];
+    snprintf(print2, sizeof(print2), "  wValue: 0x%04x\n", request->wValue);
+
+    uart_puts(UART_ID, print1);
+    uart_puts(UART_ID, print2);
+
+    switch (request->bRequest)
+    {
+    case 0x01:
+    {
+        // GET_PORT
+        uart_puts(UART_ID, "Reporting current port: ");
+        uart_putc(UART_ID, '0' + usb_selected_port);
+        uart_puts(UART_ID, "\n");
+
+        bool result = tud_control_xfer(rhport, request, &usb_selected_port, 1);
+        uart_puts(UART_ID, result ? "Sent port\n" : "Failed to send port\n");
+        return result;
+    }
+    case 0x02:
+    {
+        // GET_POWER
+        uint8_t power = 200; // mA
+        return tud_control_xfer(rhport, request, &power, 1);
+    }
+    case 0x03:
+    {
+        // SET_PORT
+        usb_switch_to_port((uint8_t)request->wValue);
+        return tud_control_status(rhport, request); // send status response
+    }
+    default:
+        // stall unknown request
+        return false;
+    }
+    return false; // should not reach here
 }
 
 void service_vendor()
@@ -159,19 +229,16 @@ void process_command(const char *cmd)
 {
     if (strcmp(cmd, "set 1") == 0)
     {
-        gpio_put(USB_MUX_SEL_PIN, 1);
-        uart_puts(UART_ID, "USB MUX set to 1\n");
+        usb_switch_to_port(1);
     }
     else if (strcmp(cmd, "set 0") == 0)
     {
-        gpio_put(USB_MUX_SEL_PIN, 0);
-        uart_puts(UART_ID, "USB MUX set to 0\n");
+        usb_switch_to_port(0);
     }
     else if (strcmp(cmd, "get") == 0)
     {
-        int state = gpio_get(USB_MUX_SEL_PIN);
         char response[32];
-        snprintf(response, sizeof(response), "USB MUX state: %d\n", state);
+        snprintf(response, sizeof(response), "USB MUX state: %d\n", usb_selected_port);
         uart_puts(UART_ID, response);
     }
     else if (strcmp(cmd, "reboot") == 0)

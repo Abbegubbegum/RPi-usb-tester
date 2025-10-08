@@ -121,7 +121,6 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index)
 
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 {
-    // TODO: check lang id
     (void)langid;
     size_t char_count;
     static uint16_t _desc_str[32 + 1];
