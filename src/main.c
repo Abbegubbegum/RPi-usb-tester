@@ -4,6 +4,7 @@
 
 #include <pico/stdio.h>
 #include <pico/stdlib.h>
+#include <pico/bootrom.h>
 
 #include <hardware/uart.h>
 #include <hardware/irq.h>
@@ -22,7 +23,7 @@ static void init_gpio()
     // Initialize the GPIO pin for USB mux selection
     gpio_init(USB_MUX_SEL_PIN);
     gpio_set_dir(USB_MUX_SEL_PIN, GPIO_OUT);
-    gpio_put(USB_MUX_SEL_PIN, 1);
+    gpio_put(USB_MUX_SEL_PIN, 0);
 }
 
 static void init_uart()
@@ -149,6 +150,42 @@ void service_vendor()
     }
 }
 
+#define CMD_BUFFER_SIZE 32
+
+static char cmd_buffer[CMD_BUFFER_SIZE];
+static uint8_t cmd_buflen = 0;
+
+void process_command(const char *cmd)
+{
+    if (strcmp(cmd, "set 1") == 0)
+    {
+        gpio_put(USB_MUX_SEL_PIN, 1);
+        uart_puts(UART_ID, "USB MUX set to 1\n");
+    }
+    else if (strcmp(cmd, "set 0") == 0)
+    {
+        gpio_put(USB_MUX_SEL_PIN, 0);
+        uart_puts(UART_ID, "USB MUX set to 0\n");
+    }
+    else if (strcmp(cmd, "get") == 0)
+    {
+        int state = gpio_get(USB_MUX_SEL_PIN);
+        char response[32];
+        snprintf(response, sizeof(response), "USB MUX state: %d\n", state);
+        uart_puts(UART_ID, response);
+    }
+    else if (strcmp(cmd, "reboot") == 0)
+    {
+        uart_puts(UART_ID, "Rebooting into bootloader...\n");
+        sleep_ms(100); // Give time for message to be sent
+        reset_usb_boot(0, 0);
+    }
+    else
+    {
+        uart_puts(UART_ID, "Unknown command\n");
+    }
+}
+
 void on_uart_rx()
 {
     if (uart_is_readable(UART_ID))
@@ -157,15 +194,33 @@ void on_uart_rx()
         // Echo back the received character
         uart_putc(UART_ID, ch);
 
-        if (ch == '1')
+        if (ch == '\r' || ch == '\n')
         {
-            gpio_put(USB_MUX_SEL_PIN, 1);
-            uart_puts(UART_ID, "USB MUX set to 1\n");
+            if (cmd_buflen == 0)
+                return; // Ignore empty commands
+            // End of command
+            cmd_buffer[cmd_buflen] = 0; // Null-terminate the string
+            cmd_buflen = 0;             // Reset buffer length for next command
+            uart_puts(UART_ID, "\n");   // New line after command
+
+            // Process command
+            process_command(cmd_buffer);
         }
-        else if (ch == '0')
+        else if (ch == 8 || ch == 127)
         {
-            gpio_put(USB_MUX_SEL_PIN, 0);
-            uart_puts(UART_ID, "USB MUX set to 0\n");
+            if (cmd_buflen > 0)
+            {
+                // Handle backspace/delete: remove last char and erase it on the terminal
+                cmd_buflen--;
+                // uart_putc(UART_ID, '\b');
+                // uart_putc(UART_ID, ' ');
+                // uart_putc(UART_ID, '\b');
+            }
+        }
+        else if (cmd_buflen < CMD_BUFFER_SIZE - 1)
+        {
+            // Store character in command buffer
+            cmd_buffer[cmd_buflen++] = ch;
         }
     }
 }
