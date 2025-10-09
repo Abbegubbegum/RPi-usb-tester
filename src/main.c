@@ -14,7 +14,7 @@
 
 #include "include.h"
 
-static uint8_t g_vnd_buffer[1280];
+static uint8_t g_vnd_buffer[2048];
 static uint16_t g_vnd_buflen = 0;
 static uint16_t g_vnd_expected_packet_size = 0;
 
@@ -23,8 +23,6 @@ static uint8_t g_port_map = 0;   // Bitmap of which ports have been connected to
 static uint8_t g_port_count = 0; // Number of enumerated ports
 static bool g_mounted = false;
 
-static bool g_pending_switch = false;
-static bool g_switch_request_finished = true;
 static uint8_t g_pending_port = 0;
 
 static char g_cmd_buffer[CMD_BUFFER_SIZE];
@@ -33,7 +31,6 @@ static uint8_t g_cmd_buflen = 0;
 void service_vendor();
 void on_uart_rx();
 void scan_present_ports();
-void usb_switch_to_port(uint8_t port);
 
 void print_fmt(const char *fmt, ...)
 {
@@ -47,6 +44,7 @@ void print_fmt(const char *fmt, ...)
     if (len > 0)
     {
         uart_puts(UART_ID, buf);
+        uart_puts(UART_ID, "\r\n");
     }
 }
 
@@ -80,7 +78,7 @@ static void init_uart()
     irq_set_enabled(UART0_IRQ, true);
     uart_set_irq_enables(UART_ID, true, false);
 
-    print_fmt("\nUART initialized\n");
+    print_fmt("\nUART initialized");
 }
 
 int main(void)
@@ -111,12 +109,6 @@ int main(void)
 
         service_vendor();
 
-        if (g_pending_switch && g_switch_request_finished)
-        {
-            g_pending_switch = false;
-            usb_switch_to_port(g_pending_port);
-        }
-
         watchdog_update();
     }
 
@@ -137,7 +129,7 @@ void usb_switch_to_port(uint8_t port)
     sleep_ms(5); // Wait for the mux to switch
     tud_connect();
 
-    print_fmt("Switched USB MUX to port %d\n", port);
+    print_fmt("Switched USB MUX to port %d", port);
     g_active_port = port;
 }
 
@@ -159,7 +151,7 @@ bool read_vbus_adc(uint adc_chan)
     uint16_t mv = adc_mv(code);
 
     // Print
-    print_fmt("ADC%d: code=%d, VBUS=%dmV\n", adc_chan, code, mv);
+    print_fmt("ADC%d: code=%d, VBUS=%dmV", adc_chan, code, mv);
     return mv >= 3800;
 }
 
@@ -171,13 +163,13 @@ void scan_present_ports()
     {
         if (gpio_get(port == 0 ? PORT_0_VBUS_SENSE_PIN : PORT_1_VBUS_SENSE_PIN))
         {
-            print_fmt("Detected VBUS on port %d\n", port);
+            print_fmt("Detected VBUS on port %d", port);
             g_port_map |= (1 << port);
             g_port_count++;
         }
     }
 
-    print_fmt("Detected %d port(s)\n", g_port_count);
+    print_fmt("Detected %d port(s)", g_port_count);
 }
 
 bool probe_port(uint8_t port)
@@ -200,13 +192,13 @@ void tud_mount_cb(void)
 {
     g_mounted = true;
 
-    print_fmt("USB mounted port %d\n", g_active_port);
+    print_fmt("USB mounted port %d", g_active_port);
 }
 
 void tud_umount_cb(void)
 {
     g_mounted = false;
-    print_fmt("USB unmounted port %d\n", g_active_port);
+    print_fmt("USB unmounted port %d", g_active_port);
 }
 
 // callback when data is received on a CDC interface
@@ -255,6 +247,33 @@ void tud_vendor_tx_cb(uint8_t itf, uint32_t sent_bytes)
     // printf("Sent 0x%04x bytes\n", sent_bytes);
 }
 
+int64_t do_port_switch(alarm_id_t id, void *user_data)
+{
+    (void)id;
+    (void)user_data;
+
+    scan_present_ports();
+
+    if (g_pending_port != g_active_port)
+    {
+        if ((g_port_map & (1 << g_pending_port)) == 0)
+        {
+            print_fmt("Port %d not available, ignoring switch request", g_pending_port);
+        }
+        else
+        {
+            print_fmt("Switching to port %d as requested by host", g_pending_port);
+            usb_switch_to_port(g_pending_port);
+        }
+    }
+    else
+    {
+        print_fmt("Already on port %d, ignoring switch request", g_pending_port);
+    }
+
+    return 0;
+}
+
 enum
 {
     REQ_GET_PORT = 0x01,
@@ -267,22 +286,21 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
 {
     if (stage != CONTROL_STAGE_SETUP)
     {
-        if (stage == CONTROL_STAGE_ACK && g_pending_switch)
+        if (stage == CONTROL_STAGE_ACK && request->bRequest == REQ_SET_PORT)
         {
-            g_switch_request_finished = true;
+            add_alarm_in_ms(5, do_port_switch, NULL, false);
         }
         return true;
     }
 
-    print_fmt("Vendor control request: 0x%02x", request->bRequest);
-    print_fmt("  wValue: 0x%04x\n", request->wValue);
+    print_fmt("Vendor control request: 0x%02x   wValue: 0x%04x", request->bRequest, request->wValue);
 
     switch (request->bRequest)
     {
     case REQ_GET_PORT:
     {
         // GET_PORT
-        print_fmt("Reporting current port: %d\n", g_active_port);
+        print_fmt("Reporting current port: %d", g_active_port);
 
         bool result = tud_control_xfer(rhport, request, &g_active_port, 1);
         return result;
@@ -291,8 +309,6 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
     {
         // SET_PORT
         g_pending_port = (uint8_t)request->wValue;
-        g_pending_switch = true;
-        g_switch_request_finished = false;
         return tud_control_status(rhport, request); // send status response
     }
     case REQ_GET_POWER:
@@ -325,20 +341,19 @@ void service_vendor()
         // If we have not parsed a header yet and have enough bits in the buffer
         if (g_vnd_expected_packet_size == 0 && g_vnd_buflen >= 6)
         {
-            // printf("Parsing header: ");
             // Parse little endian
             uint32_t seq = (uint32_t)g_vnd_buffer[0] | ((uint32_t)g_vnd_buffer[1] << 8) |
                            ((uint32_t)g_vnd_buffer[2] << 16) | ((uint32_t)g_vnd_buffer[3] << 24);
             uint16_t len = (uint16_t)g_vnd_buffer[4] | ((uint16_t)g_vnd_buffer[5] << 8);
 
-            // printf("seq: %d, size: %d\n", seq, len);
+            // print_fmt("Parsing header: seq: %d, size: %d", seq, len);
 
             g_vnd_expected_packet_size = (uint32_t)len;
         }
 
         if (g_vnd_expected_packet_size && g_vnd_buflen >= g_vnd_expected_packet_size)
         {
-            // printf("Received enough bytes, sending packet\n");
+            // print_fmt("Received enough bytes, sending packet");
             tud_vendor_write(g_vnd_buffer, g_vnd_expected_packet_size);
             tud_vendor_flush();
 
@@ -362,24 +377,24 @@ void process_command(const char *cmd)
     }
     else if (strcmp(cmd, "get") == 0)
     {
-        print_fmt("Current USB MUX port: %d\n", g_active_port);
+        print_fmt("Current USB MUX port: %d", g_active_port);
     }
     else if (strcmp(cmd, "rst") == 0)
     {
-        print_fmt("Restarting...\n");
+        print_fmt("Restarting...");
         sleep_ms(100); // Give time for message to be sent
         // Restart without entering bootloader
         watchdog_reboot(0, 0, 0);
     }
     else if (strcmp(cmd, "prg") == 0)
     {
-        print_fmt("Rebooting into bootloader...\n");
+        print_fmt("Rebooting into bootloader...");
         sleep_ms(100); // Give time for message to be sent
         reset_usb_boot(0, 0);
     }
     else
     {
-        print_fmt("Unknown command\n");
+        print_fmt("Unknown command");
     }
 }
 
@@ -398,7 +413,7 @@ void on_uart_rx()
             // End of command
             g_cmd_buffer[g_cmd_buflen] = 0; // Null-terminate the string
             g_cmd_buflen = 0;               // Reset buffer length for next command
-            uart_puts(UART_ID, "\n");       // New line after command
+            uart_puts(UART_ID, "\r\n");     // New line after command
 
             // Process command
             process_command(g_cmd_buffer);

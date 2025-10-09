@@ -17,7 +17,7 @@ REQ_GET_POWER = 0x03  # IN:  TBD (not used here)
 REQ_GET_PORTMAP = 0x10  # IN:  u8 port_map (bitmask of available ports)
 
 TEST_SECS = 3.0
-PKT_SIZE = 8        # total packet size including header
+PKT_SIZE = 1024        # total packet size including header
 TIMEOUT_MS = 1000
 
 # ---------------------- USB helpers ----------------------
@@ -132,6 +132,14 @@ def check_echo(buf, expected_seq, expected_len):
     return True, ""
 
 
+def recv_exact(ep_in, size, timeout_ms=TIMEOUT_MS):
+    buf = bytearray()
+    while len(buf) < size:
+        chunk = ep_in.read(size - len(buf), timeout=timeout_ms)
+        buf.extend(chunk)
+    return bytes(buf)
+
+
 def run_bulk_test(dev, duration_s=TEST_SECS, pkt_size=PKT_SIZE):
     ep_out, ep_in = find_bulk_eps(dev)
 
@@ -160,7 +168,9 @@ def run_bulk_test(dev, duration_s=TEST_SECS, pkt_size=PKT_SIZE):
             continue
 
         try:
-            echo = bytes(ep_in.read(pkt_size, timeout=TIMEOUT_MS))
+            echo = bytes(recv_exact(ep_in, pkt_size))
+            # if len(echo) == 0:
+            #     echo = bytes(ep_in.read(pkt_size, timeout=TIMEOUT_MS))
             ok, why = check_echo(echo, seq, pkt_size)
             if not ok:
                 errors += 1
