@@ -210,12 +210,13 @@ def main():
         # Run bulk loopback on this path
         res = run_bulk_test(dev, duration_s=TEST_SECS, pkt_size=PKT_SIZE)
         res["port"] = p
-        # Optionally query device for reported active port
-        try:
-            port_echo = ctrl_in(dev, REQ_GET_PORT, 1, intf_num)[0]
-            res["device_port_echo"] = int(port_echo)
-        except usb.core.USBError:
-            res["device_port_echo"] = None
+        # Query device for reported active port
+        port_echo = ctrl_in(dev, REQ_GET_PORT, 1, intf_num)[0]
+        res["device_port_echo"] = int(port_echo)
+        # Query device for power test
+        data = ctrl_in(dev, REQ_GET_POWER, 2, intf_num)
+        res["vbus_mV"] = int.from_bytes(data, byteorder="little")
+
         results.append(res)
         # Small pause between ports
         time.sleep(0.05)

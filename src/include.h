@@ -36,11 +36,14 @@ enum
 
 #define MAX_PORTS 2
 
-#define PORT_0_VBUS_SENSE_PIN 14
+static const uint8_t port_sense_pins[] = {
+    14,
+    15};
 
-#define PORT_1_VBUS_SENSE_PIN 15
-#define PORT_1_VBUS_SWITCH_PIN 13
+static const uint8_t port_vbus_switch_pins[] = {
+    0, 13};
 
+#define VBUS_ADC_PIN 26
 #define VBUS_ADC_CHAN 0
 #define VBUS_DIV_R1 675
 #define VBUS_DIV_R2 990
@@ -49,5 +52,3 @@ enum
 
 #define VREF_MV 3300
 #define ADC_MAX 4095
-// DIV R1 = 180k, R2 = 68k
-#define DIV_RATIO_X100 ((180 + 68) / 68) * 100

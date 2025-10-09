@@ -56,23 +56,26 @@ static void init_gpio()
     gpio_put(USB_MUX_SEL_PIN, 0);
 
     // GPIO pins for switching VBUS
-    gpio_init(PORT_1_VBUS_SWITCH_PIN);
-    gpio_set_dir(PORT_1_VBUS_SWITCH_PIN, GPIO_OUT);
-    gpio_put(PORT_1_VBUS_SWITCH_PIN, 0); // Start with VBUS off
+    for (uint8_t i = 0; i < MAX_PORTS; i++)
+    {
+        uint8_t pin = port_vbus_switch_pins[i];
+        gpio_init(pin);
+        gpio_set_dir(pin, GPIO_OUT);
+        gpio_put(pin, 0); // Start with VBUS off
+    }
 
     // GPIO input for VBUS sense
-    gpio_init(PORT_0_VBUS_SENSE_PIN);
-    gpio_set_dir(PORT_0_VBUS_SENSE_PIN, GPIO_IN);
-    gpio_disable_pulls(PORT_0_VBUS_SENSE_PIN);
-    gpio_set_input_hysteresis_enabled(PORT_0_VBUS_SENSE_PIN, true);
+    for (uint8_t i = 0; i < MAX_PORTS; i++)
+    {
+        uint8_t pin = port_sense_pins[i];
+        gpio_init(pin);
+        gpio_set_dir(pin, GPIO_IN);
+        gpio_disable_pulls(pin);
+        gpio_set_input_hysteresis_enabled(pin, true);
+    }
 
-    gpio_init(PORT_1_VBUS_SENSE_PIN);
-    gpio_set_dir(PORT_1_VBUS_SENSE_PIN, GPIO_IN);
-    gpio_disable_pulls(PORT_1_VBUS_SENSE_PIN);
-    gpio_set_input_hysteresis_enabled(PORT_1_VBUS_SENSE_PIN, true);
-
-    adc_gpio_init(26);
-    adc_select_input(0);
+    adc_gpio_init(VBUS_ADC_PIN);
+    adc_select_input(VBUS_ADC_CHAN);
 }
 
 static void init_uart()
@@ -89,8 +92,6 @@ static void init_uart()
 
     print_fmt("\nUART initialized");
 }
-
-uint16_t read_vbus_adc();
 
 int main(void)
 {
@@ -111,13 +112,6 @@ int main(void)
 
     watchdog_enable(2000, 1); // 2 second timeout
     // main run loop
-
-    scan_present_ports();
-    read_vbus_adc();
-    gpio_put(PORT_1_VBUS_SWITCH_PIN, 1);
-    sleep_ms(30);
-    read_vbus_adc();
-    gpio_put(PORT_1_VBUS_SWITCH_PIN, 0);
     while (1)
     {
         // TinyUSB device task | must be called regularly
@@ -154,12 +148,7 @@ uint16_t adc_mv(uint16_t adc_code, uint16_t R1, uint16_t R2)
     uint16_t mv = (uint16_t)VREF_MV * adc_code / ADC_MAX;
     float divider_scale = (float)(R1 + R2) / (float)R2;
 
-    uint16_t v_bus = mv * divider_scale;
-
-    print_fmt("R1:%d, R2:%d", R1, R2);
-    print_fmt("ADC READ: c:%d, s:%.2f, mv:%d, bus:%d", adc_code, divider_scale, mv, v_bus);
-
-    return v_bus;
+    return mv * divider_scale;
 }
 
 uint16_t read_vbus_adc()
@@ -173,7 +162,7 @@ uint16_t read_vbus_adc()
     uint16_t mv = adc_mv(code, VBUS_DIV_R1, VBUS_DIV_R2);
 
     // Print
-    print_fmt("ADC0: code=%d, VBUS=%dmV", code, mv);
+    print_fmt("ADC0: VBUS=%dmV", mv);
     return mv;
 }
 
@@ -183,7 +172,7 @@ void scan_present_ports()
     g_port_count = 0;
     for (uint8_t port = 0; port < MAX_PORTS; port++)
     {
-        if (gpio_get(port == 0 ? PORT_0_VBUS_SENSE_PIN : PORT_1_VBUS_SENSE_PIN))
+        if (gpio_get(port_sense_pins[port]))
         {
             print_fmt("Detected VBUS on port %d", port);
             g_port_map |= (1 << port);
@@ -209,6 +198,52 @@ bool probe_port(uint8_t port)
 
     return false;
 }
+
+int64_t do_port_switch(alarm_id_t id, void *user_data)
+{
+    (void)id;
+    (void)user_data;
+
+    scan_present_ports();
+
+    if (g_pending_port != g_active_port)
+    {
+        if ((g_port_map & (1 << g_pending_port)) == 0)
+        {
+            print_fmt("Port %d not available, ignoring switch request", g_pending_port);
+        }
+        else
+        {
+            print_fmt("Switching to port %d as requested by host", g_pending_port);
+            usb_switch_to_port(g_pending_port);
+        }
+    }
+    else
+    {
+        print_fmt("Already on port %d, ignoring switch request", g_pending_port);
+    }
+
+    return 0;
+}
+
+uint16_t get_power_report()
+{
+    if (g_active_port == 0)
+    {
+        return 0; // We don't have loads or adc reading for port 0 vbus because it powers the pico
+    }
+
+    gpio_put(port_vbus_switch_pins[g_active_port], 1);
+    sleep_ms(20);
+
+    uint16_t mv = read_vbus_adc();
+
+    gpio_put(port_vbus_switch_pins[g_active_port], 0);
+
+    return mv;
+}
+
+// ------------------ USB CALLBACKS -----------------------
 
 void tud_mount_cb(void)
 {
@@ -269,33 +304,6 @@ void tud_vendor_tx_cb(uint8_t itf, uint32_t sent_bytes)
     // printf("Sent 0x%04x bytes\n", sent_bytes);
 }
 
-int64_t do_port_switch(alarm_id_t id, void *user_data)
-{
-    (void)id;
-    (void)user_data;
-
-    scan_present_ports();
-
-    if (g_pending_port != g_active_port)
-    {
-        if ((g_port_map & (1 << g_pending_port)) == 0)
-        {
-            print_fmt("Port %d not available, ignoring switch request", g_pending_port);
-        }
-        else
-        {
-            print_fmt("Switching to port %d as requested by host", g_pending_port);
-            usb_switch_to_port(g_pending_port);
-        }
-    }
-    else
-    {
-        print_fmt("Already on port %d, ignoring switch request", g_pending_port);
-    }
-
-    return 0;
-}
-
 enum
 {
     REQ_GET_PORT = 0x01,
@@ -336,8 +344,8 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
     case REQ_GET_POWER:
     {
         // GET_POWER
-        uint8_t power = 200; // mA
-        return tud_control_xfer(rhport, request, &power, 1);
+        uint16_t power_report = get_power_report();
+        return tud_control_xfer(rhport, request, &power_report, sizeof(power_report));
     }
     case REQ_GET_PORTMAP:
     {
@@ -387,6 +395,8 @@ void service_vendor()
     }
 }
 
+// ------------------- UART -------------------------
+
 void process_command(const char *cmd)
 {
     if (strcmp(cmd, "set 1") == 0)
@@ -400,6 +410,11 @@ void process_command(const char *cmd)
     else if (strcmp(cmd, "get") == 0)
     {
         print_fmt("Current USB MUX port: %d", g_active_port);
+    }
+    else if (strcmp(cmd, "pwr") == 0)
+    {
+        uint16_t pwr = get_power_report();
+        print_fmt("VBUS under load: %dmV", pwr);
     }
     else if (strcmp(cmd, "rst") == 0)
     {
