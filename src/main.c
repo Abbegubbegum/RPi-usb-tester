@@ -50,11 +50,17 @@ void print_fmt(const char *fmt, ...)
 
 static void init_gpio()
 {
-    // Initialize the GPIO pin for USB mux selection
+    // GPIO pin for USB mux selection
     gpio_init(USB_MUX_SEL_PIN);
     gpio_set_dir(USB_MUX_SEL_PIN, GPIO_OUT);
     gpio_put(USB_MUX_SEL_PIN, 0);
 
+    // GPIO pins for switching VBUS
+    gpio_init(PORT_1_VBUS_SWITCH_PIN);
+    gpio_set_dir(PORT_1_VBUS_SWITCH_PIN, GPIO_OUT);
+    gpio_put(PORT_1_VBUS_SWITCH_PIN, 0); // Start with VBUS off
+
+    // GPIO input for VBUS sense
     gpio_init(PORT_0_VBUS_SENSE_PIN);
     gpio_set_dir(PORT_0_VBUS_SENSE_PIN, GPIO_IN);
     gpio_disable_pulls(PORT_0_VBUS_SENSE_PIN);
@@ -64,6 +70,9 @@ static void init_gpio()
     gpio_set_dir(PORT_1_VBUS_SENSE_PIN, GPIO_IN);
     gpio_disable_pulls(PORT_1_VBUS_SENSE_PIN);
     gpio_set_input_hysteresis_enabled(PORT_1_VBUS_SENSE_PIN, true);
+
+    adc_gpio_init(26);
+    adc_select_input(0);
 }
 
 static void init_uart()
@@ -80,6 +89,8 @@ static void init_uart()
 
     print_fmt("\nUART initialized");
 }
+
+uint16_t read_vbus_adc();
 
 int main(void)
 {
@@ -102,6 +113,11 @@ int main(void)
     // main run loop
 
     scan_present_ports();
+    read_vbus_adc();
+    gpio_put(PORT_1_VBUS_SWITCH_PIN, 1);
+    sleep_ms(30);
+    read_vbus_adc();
+    gpio_put(PORT_1_VBUS_SWITCH_PIN, 0);
     while (1)
     {
         // TinyUSB device task | must be called regularly
@@ -133,26 +149,32 @@ void usb_switch_to_port(uint8_t port)
     g_active_port = port;
 }
 
-uint16_t adc_mv(uint16_t adc_code)
+uint16_t adc_mv(uint16_t adc_code, uint16_t R1, uint16_t R2)
 {
-    uint32_t mv = (uint32_t)VREF_MV * adc_code / ADC_MAX;
-    return (uint16_t)((mv * DIV_RATIO_X100 + 50) / 100); // rounding
+    uint16_t mv = (uint16_t)VREF_MV * adc_code / ADC_MAX;
+    float divider_scale = (float)(R1 + R2) / (float)R2;
+
+    uint16_t v_bus = mv * divider_scale;
+
+    print_fmt("R1:%d, R2:%d", R1, R2);
+    print_fmt("ADC READ: c:%d, s:%.2f, mv:%d, bus:%d", adc_code, divider_scale, mv, v_bus);
+
+    return v_bus;
 }
 
-bool read_vbus_adc(uint adc_chan)
+uint16_t read_vbus_adc()
 {
     uint32_t acc = 0;
-    adc_select_input(adc_chan);
     for (int i = 0; i < 8; i++)
     {
         acc += adc_read();
     }
     uint16_t code = acc / 8;
-    uint16_t mv = adc_mv(code);
+    uint16_t mv = adc_mv(code, VBUS_DIV_R1, VBUS_DIV_R2);
 
     // Print
-    print_fmt("ADC%d: code=%d, VBUS=%dmV", adc_chan, code, mv);
-    return mv >= 3800;
+    print_fmt("ADC0: code=%d, VBUS=%dmV", code, mv);
+    return mv;
 }
 
 void scan_present_ports()

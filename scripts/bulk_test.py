@@ -85,7 +85,7 @@ def get_ports_to_test(dev):
 def set_port_and_reopen(dev, intf_num, port):
     ctrl_out(dev, REQ_SET_PORT, intf_num, port)
     # After a port switch the device may have re-enumerated, so refind it
-    time.sleep(1)  # brief settle
+    time.sleep(1)  # let device settle
     dev = find_device()
     intf_num = find_vendor_interface(dev).bInterfaceNumber
     return dev

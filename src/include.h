@@ -37,7 +37,13 @@ enum
 #define MAX_PORTS 2
 
 #define PORT_0_VBUS_SENSE_PIN 14
+
 #define PORT_1_VBUS_SENSE_PIN 15
+#define PORT_1_VBUS_SWITCH_PIN 13
+
+#define VBUS_ADC_CHAN 0
+#define VBUS_DIV_R1 675
+#define VBUS_DIV_R2 990
 
 #define CMD_BUFFER_SIZE 32
 
