@@ -11,6 +11,7 @@
 #include <hardware/irq.h>
 #include <hardware/gpio.h>
 #include <hardware/adc.h>
+#include <hardware/dma.h>
 #include <hardware/watchdog.h>
 #include <hardware/pwm.h>
 
@@ -30,9 +31,19 @@ static uint8_t g_pending_port = 0;
 static char g_cmd_buffer[CMD_BUFFER_SIZE];
 static uint8_t g_cmd_buflen = 0;
 
+static uint16_t g_current_load = 0;
+
+static int g_dma_chan = -1;
+static uint16_t *g_adc_sample_buf = NULL;
+static uint32_t g_adc_samples_per_ms = 0;
+static uint32_t g_adc_samples_per_window = 0;
+static uint32_t g_adc_samples_transient = 0;
+
+static power_report_t g_power_report;
+
 void service_vendor();
 void on_uart_rx();
-void scan_present_ports();
+void read_present_ports();
 void pwm_set_duty_frac(uint8_t pin, float frac);
 
 void print_fmt(const char *fmt, ...)
@@ -73,7 +84,7 @@ void init_gpio()
     // GPIO pins for switching VBUS
     for (uint8_t i = 0; i < MAX_PORTS; i++)
     {
-        uint8_t pin = port_vbus_switch_pins[i];
+        uint8_t pin = PORT_VBUS_SWITCH_PINS[i];
         gpio_init(pin);
         gpio_set_dir(pin, GPIO_OUT);
         gpio_put(pin, 0); // Start with VBUS off
@@ -82,16 +93,12 @@ void init_gpio()
     // GPIO input for VBUS sense
     for (uint8_t i = 0; i < MAX_PORTS; i++)
     {
-        uint8_t pin = port_sense_pins[i];
+        uint8_t pin = PORT_SENSE_PINS[i];
         gpio_init(pin);
         gpio_set_dir(pin, GPIO_IN);
         gpio_disable_pulls(pin);
         gpio_set_input_hysteresis_enabled(pin, true);
     }
-
-    adc_gpio_init(VBUS_ADC_PIN);
-    adc_gpio_init(CURRENT_MEAS_PIN);
-    adc_select_input(VBUS_ADC_CHAN);
 }
 
 void init_uart()
@@ -109,6 +116,34 @@ void init_uart()
     print_fmt("\nUART initialized");
 }
 
+// This is for the VBUS sensing and Current sensing
+void init_adc_dma()
+{
+    g_adc_samples_per_ms = ADC_SAMPLE_RATE_HZ / 1000u;
+    g_adc_samples_per_window = g_adc_samples_per_ms * STEP_WINDOW_MS;
+    g_adc_samples_transient = g_adc_samples_per_ms * TRANSIENT_MS;
+
+    g_adc_sample_buf = (uint16_t *)calloc(g_adc_samples_per_window, sizeof(uint16_t));
+
+    adc_init();
+    adc_gpio_init(VBUS_ADC_PIN);
+    adc_select_input(VBUS_ADC_CHAN);
+
+    // FIFO: enable, DREQ on, 12-bit right aligned, no error bit
+    adc_fifo_setup(true, true, 1, false, false);
+
+    // Set ADC clock divider to get the required sample rate:
+    // ADC clock 48 MHz / (1 + div) = SAMPLE_RATE_HZ
+    // => div = (48e6 / SAMPLE_RATE_HZ) - 1
+    float div = 48000000.0f / (float)ADC_SAMPLE_RATE_HZ - 1.0f;
+    if (div < 0.0f)
+        div = 0.0f;
+    adc_set_clkdiv(div);
+
+    // DMA channel
+    g_dma_chan = dma_claim_unused_channel(true);
+}
+
 int main(void)
 {
     // Initialize TinyUSB stack
@@ -120,8 +155,6 @@ int main(void)
     {
         board_init_after_tusb();
     }
-
-    adc_init();
 
     init_gpio();
     init_uart();
@@ -176,11 +209,46 @@ void pwm_set_duty_frac(uint8_t pin, float frac)
     print_fmt("Set PWM duty cycle to %.1f", frac * 100);
 }
 
-uint16_t convert_res_divider(uint16_t mv, uint16_t R1, uint16_t R2)
+void load_set_mA(uint16_t mA)
+{
+    // Because of lifted ground issues, 100% duty cycle is closer to 450mA than 500mA
+    // therefore 500/450 = 1.11 scale factor
+    float duty = (mA / 500.0f) * 1.11f;
+
+    if (duty > 1.0f)
+        duty = 1.0f;
+
+    pwm_set_duty_frac(PWM_PIN, duty);
+    g_current_load = mA;
+}
+
+void load_ramp_to_mA(uint16_t target_mA, uint32_t ramp_us)
+{
+    const uint32_t steps = ramp_us / 1000u + 1u;
+    int32_t delta = (int32_t)target_mA - (int32_t)g_current_load;
+    for (uint32_t i = 1; i <= steps; i++)
+    {
+        uint16_t mA = (uint16_t)(g_current_load + (delta * (int32_t)i) / (int32_t)steps);
+        load_set_mA(mA);
+        sleep_us(1000);
+    }
+}
+
+uint16_t adc_code_to_mV(uint16_t code)
+{
+    return (uint16_t)VREF_MV * code / ADC_MAX;
+}
+
+uint16_t convert_mv_res_divider(uint16_t mv, uint16_t R1, uint16_t R2)
 {
     float divider_scale = (float)(R1 + R2) / (float)R2;
 
     return mv * divider_scale;
+}
+
+uint16_t adc_code_to_vbus_mV(uint16_t code)
+{
+    return convert_mv_res_divider(adc_code_to_mV(code), VBUS_DIV_R1, VBUS_DIV_R2);
 }
 
 uint16_t read_adc_mv(uint channel)
@@ -192,7 +260,7 @@ uint16_t read_adc_mv(uint channel)
         acc += adc_read();
     uint16_t avg = (uint16_t)(acc / samples);
 
-    uint16_t mv = (uint16_t)VREF_MV * avg / ADC_MAX;
+    uint16_t mv = adc_code_to_mV(avg);
 
     print_fmt("CHAN%d: %dmV", channel, mv);
 
@@ -201,7 +269,7 @@ uint16_t read_adc_mv(uint channel)
 
 uint16_t read_vbus_mv()
 {
-    uint16_t mv = convert_res_divider(read_adc_mv(VBUS_ADC_CHAN), VBUS_DIV_R1, VBUS_DIV_R2);
+    uint16_t mv = convert_mv_res_divider(read_adc_mv(VBUS_ADC_CHAN), VBUS_DIV_R1, VBUS_DIV_R2);
 
     // Print
     print_fmt("VBUS: %dmV", mv);
@@ -218,13 +286,29 @@ uint16_t read_current_mA()
     return mA;
 }
 
-void scan_present_ports()
+void set_activated_vbus(uint8_t port)
+{
+    for (int i = 0; i < MAX_PORTS; i++)
+    {
+        gpio_put(PORT_VBUS_SWITCH_PINS[i], 0);
+    }
+
+    sleep_us(100);
+
+    gpio_put(PORT_VBUS_SWITCH_PINS[port], 1);
+
+    print_fmt("VBUS %d ON", port);
+
+    sleep_us(100);
+}
+
+void read_present_ports()
 {
     g_port_map = 0;
     g_port_count = 0;
     for (uint8_t port = 0; port < MAX_PORTS; port++)
     {
-        if (gpio_get(port_sense_pins[port]))
+        if (gpio_get(PORT_SENSE_PINS[port]))
         {
             print_fmt("Detected VBUS on port %d", port);
             g_port_map |= (1 << port);
@@ -235,7 +319,7 @@ void scan_present_ports()
     print_fmt("Detected %d port(s)", g_port_count);
 }
 
-bool probe_port(uint8_t port)
+bool usb_probe_port(uint8_t port)
 {
     usb_switch_to_port(port);
     uint32_t t0 = board_millis();
@@ -251,12 +335,12 @@ bool probe_port(uint8_t port)
     return false;
 }
 
-int64_t do_port_switch(alarm_id_t id, void *user_data)
+int64_t usb_do_port_switch(alarm_id_t id, void *user_data)
 {
     (void)id;
     (void)user_data;
 
-    scan_present_ports();
+    read_present_ports();
 
     if (g_pending_port != g_active_port)
     {
@@ -278,21 +362,179 @@ int64_t do_port_switch(alarm_id_t id, void *user_data)
     return 0;
 }
 
-uint16_t get_power_report()
+// ------------------ POWER TESTING -----------------------
+
+static inline uint16_t clamp_u16(int v)
 {
-    if (g_active_port == 0)
+    if (v < 0)
+        return 0;
+    if (v > 0xFFFF)
+        return 0xFFFF;
+    return (uint16_t)v;
+}
+
+void compute_stats_from_run(adc_capture_stats_t *s_out)
+{
+    // Convert on the fly; do two passes:
+    // Pass 1: transient (0..g_adc_samples_transient-1) for v_min & recovery
+    // Pass 2: steady (g_adc_samples_transient..n-1) for mean and ripple
+    uint32_t vmin = 0xFFFFFFFFu;
+    uint32_t vmax = 0;
+    uint64_t sum = 0;
+    uint32_t smin = 0xFFFFFFFFu, smax = 0;
+
+    // Transient window
+    for (uint32_t i = 0; i < g_adc_samples_transient && i < g_adc_samples_per_window; ++i)
     {
-        return 0; // We don't have loads or adc reading for port 0 vbus because it powers the pico
+        uint32_t mv = adc_code_to_vbus_mV(g_adc_sample_buf[i]);
+        if (mv < vmin)
+            vmin = mv;
     }
 
-    gpio_put(port_vbus_switch_pins[g_active_port], 1);
+    // Steady window
+    uint32_t steady_count = g_adc_samples_per_window - g_adc_samples_transient;
+    if (steady_count == 0)
+        steady_count = 1;
+
+    for (uint32_t i = g_adc_samples_transient; i < g_adc_samples_per_window; ++i)
+    {
+        uint32_t mv = adc_code_to_vbus_mV(g_adc_sample_buf[i]);
+        sum += mv;
+        if (mv < smin)
+            smin = mv;
+        if (mv > smax)
+            smax = mv;
+    }
+
+    uint32_t mean = (uint32_t)(sum / (uint64_t)steady_count);
+    uint32_t ripple = (smax > smin) ? (smax - smin) : 0;
+
+    // Recovery time: first index in transient where VBUS >= (mean - VRECOV_THRESH_MV)
+    uint32_t thresh = (mean > VRECOV_THRESH_MV) ? (mean - VRECOV_THRESH_MV) : 0;
+    uint32_t rec_idx = g_adc_samples_transient; // default: within steady window
+    for (uint32_t i = 0; i < g_adc_samples_transient && i < g_adc_samples_per_window; ++i)
+    {
+        uint32_t mv = adc_code_to_vbus_mV(g_adc_sample_buf[i]);
+        if (mv >= thresh)
+        {
+            rec_idx = i;
+            break;
+        }
+    }
+    uint32_t rec_us = (rec_idx * 1000000u) / ADC_SAMPLE_RATE_HZ;
+
+    s_out->v_min_mV = clamp_u16((int)vmin);
+    s_out->v_max_mV = clamp_u16((int)vmax);
+    s_out->v_mean_mV = clamp_u16((int)mean);
+    s_out->ripple_mVpp = clamp_u16((int)ripple);
+    s_out->recovery_us = rec_us;
+}
+
+void adc_dma_capture_window_blocking()
+{
+    dma_channel_config c = dma_channel_get_default_config(g_dma_chan);
+
+    channel_config_set_read_increment(&c, false);
+    channel_config_set_write_increment(&c, true);
+    channel_config_set_dreq(&c, DREQ_ADC);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_16);
+
+    dma_channel_configure(g_dma_chan, &c,
+                          g_adc_sample_buf,         // write addr
+                          &adc_hw->fifo,            // read addr
+                          g_adc_samples_per_window, // number of samples
+                          false);
+
+    adc_fifo_drain();
+    adc_run(false);
+    adc_fifo_setup(true, true, 1, false, false);
+    adc_run(true);
+    dma_start_channel_mask(1u << g_dma_chan);
+
+    // Wait until done
+    dma_channel_wait_for_finish_blocking(g_dma_chan);
+    adc_run(false);
+}
+
+void run_power_test(power_report_t *out_report)
+{
+
+    uint8_t steps_count = 2;
+    uint16_t steps_mA[2] = {100, 200};
+
+    load_set_mA(0);
+
+    memset(out_report, 0, sizeof(*out_report));
+
+    out_report->port = g_active_port;
+    out_report->n_steps = steps_count;
+    out_report->maxpower_mA = 100;
+
+    if (g_active_port == 0)
+    {
+        print_fmt("Can't run power test on port 0");
+        out_report->flags |= (1u << 2); // cant_load
+        return;
+    }
+
+    adc_dma_capture_window_blocking();
+
+    adc_capture_stats_t s0;
+    compute_stats_from_run(&s0);
+    out_report->v_idle_mV = s0.v_mean_mV;
+
+    print_fmt("IDLE: %dmV", s0.v_mean_mV);
+
+    // If VBUS missing, flag & bail with partial report
+    if (out_report->v_idle_mV < 3000)
+    {
+        out_report->flags |= (1u << 0); // vbus_missing
+        return;
+    }
+
+    uint16_t max_current_ok = 0;
+    bool ocp = false;
+    uint16_t ocp_at = 0;
+
+    for (uint8_t i = 0; i < steps_count; i++)
+    {
+        uint16_t req_mA = steps_mA[i];
+        out_report->loads_mA[i] = req_mA;
+
+        load_ramp_to_mA(req_mA, 2000);
+
+        adc_dma_capture_window_blocking();
+
+        adc_capture_stats_t s;
+        compute_stats_from_run(&s);
+        out_report->v_min_mV[i] = s.v_min_mV;
+        out_report->v_mean_mV[i] = s.v_mean_mV;
+        out_report->ripple_mVpp[i] = s.ripple_mVpp;
+        out_report->droop_mV[i] = (out_report->v_idle_mV > s.v_min_mV) ? (out_report->v_idle_mV - s.v_min_mV) : 0;
+        out_report->recovery_us[i] = s.recovery_us;
+
+        print_fmt("LOAD: %dmA, V: %dmV", req_mA, s.v_mean_mV);
+
+        if (s.v_mean_mV < UNDERVOLT_LIMIT_MV)
+        {
+            ocp = true;
+            ocp_at = req_mA;
+            load_set_mA(0);
+            break;
+        }
+
+        max_current_ok = req_mA;
+    }
+
+    load_set_mA(0);
     sleep_ms(20);
 
-    uint16_t mv = read_vbus_mv();
-
-    gpio_put(port_vbus_switch_pins[g_active_port], 0);
-
-    return mv;
+    out_report->max_current_mA = max_current_ok;
+    if (ocp)
+    {
+        out_report->flags |= (1u << 1); // ocp
+        out_report->ocp_at_mA = ocp_at;
+    }
 }
 
 // ------------------ USB CALLBACKS -----------------------
@@ -370,7 +612,7 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
     {
         if (stage == CONTROL_STAGE_ACK && request->bRequest == REQ_SET_PORT)
         {
-            add_alarm_in_ms(5, do_port_switch, NULL, false);
+            add_alarm_in_ms(5, usb_do_port_switch, NULL, false);
         }
         return true;
     }
@@ -396,13 +638,14 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
     case REQ_GET_POWER:
     {
         // GET_POWER
-        uint16_t power_report = get_power_report();
-        return tud_control_xfer(rhport, request, &power_report, sizeof(power_report));
+        memset(&g_power_report, 0, sizeof(g_power_report));
+        run_power_test(&g_power_report);
+        return tud_control_xfer(rhport, request, &g_power_report, sizeof(g_power_report));
     }
     case REQ_GET_PORTMAP:
     {
         // GET_PORTMAP
-        scan_present_ports();
+        read_present_ports();
         return tud_control_xfer(rhport, request, &g_port_map, 1);
     }
     default:
@@ -465,35 +708,36 @@ void process_command(const char *cmd)
     }
     else if (strcmp(cmd, "pwr") == 0)
     {
-        get_power_report();
+        memset(&g_power_report, 0, sizeof(g_power_report));
+        run_power_test(&g_power_report);
     }
     else if (strcmp(cmd, "current") == 0)
     {
         read_current_mA();
     }
-    else if (strcmp(cmd, "pwm 0") == 0)
+    else if (strcmp(cmd, "load 0") == 0)
     {
-        pwm_set_duty_frac(PWM_PIN, 0);
+        load_set_mA(0);
     }
-    else if (strcmp(cmd, "pwm 20") == 0)
+    else if (strcmp(cmd, "load 100") == 0)
     {
-        pwm_set_duty_frac(PWM_PIN, 0.2);
+        load_set_mA(100);
     }
-    else if (strcmp(cmd, "pwm 40") == 0)
+    else if (strcmp(cmd, "load 200") == 0)
     {
-        pwm_set_duty_frac(PWM_PIN, 0.4);
+        load_set_mA(200);
     }
-    else if (strcmp(cmd, "pwm 60") == 0)
+    else if (strcmp(cmd, "load 300") == 0)
     {
-        pwm_set_duty_frac(PWM_PIN, 0.6);
+        load_set_mA(300);
     }
-    else if (strcmp(cmd, "pwm 80") == 0)
+    else if (strcmp(cmd, "load 400") == 0)
     {
-        pwm_set_duty_frac(PWM_PIN, 0.8);
+        load_set_mA(400);
     }
-    else if (strcmp(cmd, "pwm 100") == 0)
+    else if (strcmp(cmd, "load 500") == 0)
     {
-        pwm_set_duty_frac(PWM_PIN, 1);
+        load_set_mA(500);
     }
     else if (strcmp(cmd, "rst") == 0)
     {
