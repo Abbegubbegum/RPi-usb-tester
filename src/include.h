@@ -52,3 +52,9 @@ static const uint8_t port_vbus_switch_pins[] = {
 
 #define VREF_MV 3300
 #define ADC_MAX 4095
+
+#define PWM_WRAP 499
+#define PWM_PIN 4
+
+#define CURRENT_MEAS_PIN 27
+#define CURRENT_MEAS_ADC_CHAN 1

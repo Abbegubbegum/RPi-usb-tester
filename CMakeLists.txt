@@ -46,7 +46,7 @@ pico_enable_stdio_usb(RPI_LOOPBACK 0)
 
 # Add the standard library to the build
 target_link_libraries(RPI_LOOPBACK
-        pico_stdlib pico_unique_id tinyusb_device tinyusb_board hardware_adc)
+        pico_stdlib pico_unique_id tinyusb_device tinyusb_board hardware_adc hardware_pwm)
 
 # Add the standard include files to the build
 target_include_directories(RPI_LOOPBACK PRIVATE

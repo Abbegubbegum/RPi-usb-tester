@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <math.h>
 #include <bsp/board_api.h>
 #include <tusb.h>
 
@@ -11,6 +12,7 @@
 #include <hardware/gpio.h>
 #include <hardware/adc.h>
 #include <hardware/watchdog.h>
+#include <hardware/pwm.h>
 
 #include "include.h"
 
@@ -31,6 +33,7 @@ static uint8_t g_cmd_buflen = 0;
 void service_vendor();
 void on_uart_rx();
 void scan_present_ports();
+void pwm_set_duty_frac(uint8_t pin, float frac);
 
 void print_fmt(const char *fmt, ...)
 {
@@ -48,7 +51,19 @@ void print_fmt(const char *fmt, ...)
     }
 }
 
-static void init_gpio()
+void init_pwm()
+{
+    gpio_set_function(PWM_PIN, GPIO_FUNC_PWM);
+    uint slice = pwm_gpio_to_slice_num(PWM_PIN);
+
+    pwm_set_wrap(slice, PWM_WRAP);
+    // pwm_set_clkdiv(slice, 1.0f);
+    pwm_set_enabled(slice, true);
+
+    pwm_set_duty_frac(PWM_PIN, 0);
+}
+
+void init_gpio()
 {
     // GPIO pin for USB mux selection
     gpio_init(USB_MUX_SEL_PIN);
@@ -75,10 +90,11 @@ static void init_gpio()
     }
 
     adc_gpio_init(VBUS_ADC_PIN);
+    adc_gpio_init(CURRENT_MEAS_PIN);
     adc_select_input(VBUS_ADC_CHAN);
 }
 
-static void init_uart()
+void init_uart()
 {
     // Set up UART
     uart_init(UART_ID, BAUD_RATE);
@@ -109,6 +125,7 @@ int main(void)
 
     init_gpio();
     init_uart();
+    init_pwm();
 
     watchdog_enable(2000, 1); // 2 second timeout
     // main run loop
@@ -143,27 +160,62 @@ void usb_switch_to_port(uint8_t port)
     g_active_port = port;
 }
 
-uint16_t adc_mv(uint16_t adc_code, uint16_t R1, uint16_t R2)
+void pwm_set_duty_frac(uint8_t pin, float frac)
 {
-    uint16_t mv = (uint16_t)VREF_MV * adc_code / ADC_MAX;
+    if (frac < 0.0f)
+        frac = 0.0f;
+    if (frac > 1.0f)
+        frac = 1.0f;
+
+    uint slice = pwm_gpio_to_slice_num(pin);
+
+    uint16_t level = (uint16_t)lroundf(frac * PWM_WRAP);
+
+    pwm_set_gpio_level(pin, level);
+
+    print_fmt("Set PWM duty cycle to %.1f", frac * 100);
+}
+
+uint16_t convert_res_divider(uint16_t mv, uint16_t R1, uint16_t R2)
+{
     float divider_scale = (float)(R1 + R2) / (float)R2;
 
     return mv * divider_scale;
 }
 
-uint16_t read_vbus_adc()
+uint16_t read_adc_mv(uint channel)
 {
+    adc_select_input(channel);
     uint32_t acc = 0;
-    for (int i = 0; i < 8; i++)
-    {
+    uint8_t samples = 32;
+    for (int i = 0; i < samples; i++)
         acc += adc_read();
-    }
-    uint16_t code = acc / 8;
-    uint16_t mv = adc_mv(code, VBUS_DIV_R1, VBUS_DIV_R2);
+    uint16_t avg = (uint16_t)(acc / samples);
+
+    uint16_t mv = (uint16_t)VREF_MV * avg / ADC_MAX;
+
+    print_fmt("CHAN%d: %dmV", channel, mv);
+
+    return mv;
+}
+
+uint16_t read_vbus_mv()
+{
+    uint16_t mv = convert_res_divider(read_adc_mv(VBUS_ADC_CHAN), VBUS_DIV_R1, VBUS_DIV_R2);
 
     // Print
-    print_fmt("ADC0: VBUS=%dmV", mv);
+    print_fmt("VBUS: %dmV", mv);
     return mv;
+}
+
+uint16_t read_current_mA()
+{
+    uint16_t mv = read_adc_mv(CURRENT_MEAS_ADC_CHAN);
+
+    uint16_t mA = mv / (0.51f * 13.2f);
+
+    print_fmt("CURRENT: %dmA", mA);
+    return mA;
 }
 
 void scan_present_ports()
@@ -236,7 +288,7 @@ uint16_t get_power_report()
     gpio_put(port_vbus_switch_pins[g_active_port], 1);
     sleep_ms(20);
 
-    uint16_t mv = read_vbus_adc();
+    uint16_t mv = read_vbus_mv();
 
     gpio_put(port_vbus_switch_pins[g_active_port], 0);
 
@@ -413,8 +465,35 @@ void process_command(const char *cmd)
     }
     else if (strcmp(cmd, "pwr") == 0)
     {
-        uint16_t pwr = get_power_report();
-        print_fmt("VBUS under load: %dmV", pwr);
+        get_power_report();
+    }
+    else if (strcmp(cmd, "current") == 0)
+    {
+        read_current_mA();
+    }
+    else if (strcmp(cmd, "pwm 0") == 0)
+    {
+        pwm_set_duty_frac(PWM_PIN, 0);
+    }
+    else if (strcmp(cmd, "pwm 20") == 0)
+    {
+        pwm_set_duty_frac(PWM_PIN, 0.2);
+    }
+    else if (strcmp(cmd, "pwm 40") == 0)
+    {
+        pwm_set_duty_frac(PWM_PIN, 0.4);
+    }
+    else if (strcmp(cmd, "pwm 60") == 0)
+    {
+        pwm_set_duty_frac(PWM_PIN, 0.6);
+    }
+    else if (strcmp(cmd, "pwm 80") == 0)
+    {
+        pwm_set_duty_frac(PWM_PIN, 0.8);
+    }
+    else if (strcmp(cmd, "pwm 100") == 0)
+    {
+        pwm_set_duty_frac(PWM_PIN, 1);
     }
     else if (strcmp(cmd, "rst") == 0)
     {
