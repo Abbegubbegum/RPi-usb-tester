@@ -25,11 +25,11 @@ tusb_desc_device_t const desc_device = {
     .idProduct = DEVICE_PID,
     .bcdDevice = 0x0100, // Device release number
 
-    .iManufacturer = 0x01, // Index of manufacturer string
-    .iProduct = 0x02,      // Index of product string
-    .iSerialNumber = 0x03, // Index of serial number string
+    .iManufacturer = 0x01,      // Index of manufacturer string
+    .iProduct = 0x02,           // Index of product string
+    .iSerialNumber = 0x03,      // Index of serial number string
+    .bNumConfigurations = 0x01, // 1 configuration
 
-    .bNumConfigurations = 0x01 // 1 configuration
 };
 
 // called when host requests to get device descriptor
@@ -41,7 +41,7 @@ uint8_t const *tud_descriptor_device_cb(void);
 // configure descriptor (for 2 CDC interfaces)
 uint8_t const desc_configuration[] = {
     // config descriptor | how much power in mA, count of interfaces, ...
-    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x80, 100),
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x80, 500),
 
     // CDC 0: Communication Interface - TODO: get 64 from tusb_config.h
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0, 4, EPNUM_CDC_0_NOTIF, 8, EPNUM_CDC_0_OUT, EPNUM_CDC_0_IN, 64),

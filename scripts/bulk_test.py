@@ -5,6 +5,7 @@ import time
 import sys
 import struct
 import os
+import json
 
 # ---------------------- Config ----------------------
 VID = 0x1209
@@ -191,6 +192,56 @@ def run_bulk_test(dev, duration_s=TEST_SECS, pkt_size=PKT_SIZE):
         "errors": errors
     }
 
+
+POWER_REPORT_FMT = "<BBB" + "HH" + "5H"*8 + "HHH"
+POWER_REPORT_SIZE = struct.calcsize(POWER_REPORT_FMT)
+
+
+def parse_power_report(blob):
+    if len(blob) != POWER_REPORT_SIZE:
+        raise ValueError(
+            f"power report wrong length: {len(blob)} != {POWER_REPORT_SIZE}")
+    it = iter(struct.unpack(POWER_REPORT_FMT, blob))
+    port = next(it)
+    n_steps = next(it)
+    flags = next(it)
+    maxpower = next(it)
+    v_idle = next(it)
+
+    # helper to pull N uint16s
+    def take_u16(n): return [next(it) for _ in range(n)]
+    loads = take_u16(5)
+    v_mean = take_u16(5)
+    v_min = take_u16(5)
+    v_max = take_u16(5)
+    droop = take_u16(5)
+    ripple = take_u16(5)
+    current_mA = take_u16(5)
+    recovery_us = take_u16(5)
+
+    max_current = next(it)
+    ocp_at = next(it)
+    errors = next(it)
+    return {
+        "port": port,
+        "n_steps": n_steps,
+        "flags": flags,
+        "maxpower_mA": maxpower,
+        "v_idle_mV": v_idle,
+        "loads_mA":        loads[:n_steps],
+        "v_mean_mV":       v_mean[:n_steps],
+        "v_min_mV":        v_min[:n_steps],
+        "v_max_mV":        v_max[:n_steps],
+        "droop_mV":        droop[:n_steps],
+        "ripple_mVpp":     ripple[:n_steps],
+        "current_mA":      current_mA[:n_steps],
+        "recovery_us":     recovery_us[:n_steps],
+        "max_current_mA":  max_current,
+        "ocp_at_mA":       ocp_at,
+        "errors":          errors,
+    }
+
+
 # ---------------------- Main ----------------------
 
 
@@ -214,8 +265,8 @@ def main():
         port_echo = ctrl_in(dev, REQ_GET_PORT, 1, intf_num)[0]
         res["device_port_echo"] = int(port_echo)
         # Query device for power test
-        data = ctrl_in(dev, REQ_GET_POWER, 2, intf_num)
-        res["vbus_mV"] = int.from_bytes(data, byteorder="little")
+        data = ctrl_in(dev, REQ_GET_POWER, POWER_REPORT_SIZE, intf_num)
+        res["power_report"] = parse_power_report(bytes(data))
 
         results.append(res)
         # Small pause between ports
@@ -227,6 +278,9 @@ def main():
         "per_port": results
     }
     print(summary)
+
+    with open("report.json", "w") as f:
+        json.dump(summary, f, indent=2)
 
 
 if __name__ == "__main__":

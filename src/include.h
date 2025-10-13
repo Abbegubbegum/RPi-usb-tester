@@ -75,12 +75,14 @@ typedef struct __attribute__((packed))
     uint8_t flags;
     uint16_t maxpower_mA;
     uint16_t v_idle_mV;
-    uint16_t loads_mA[4];
-    uint16_t v_mean_mV[4];
-    uint16_t v_min_mV[4];
-    uint16_t droop_mV[4];
-    uint16_t ripple_mVpp[4];
-    uint32_t recovery_us[4];
+    uint16_t loads_mA[5];
+    uint16_t v_mean_mV[5];
+    uint16_t v_min_mV[5];
+    uint16_t v_max_mV[5];
+    uint16_t droop_mV[5];
+    uint16_t ripple_mVpp[5];
+    uint16_t current_mA[5];
+    uint16_t recovery_us[5];
     uint16_t max_current_mA;
     uint16_t ocp_at_mA;
     uint16_t errors;
@@ -92,5 +94,5 @@ typedef struct
     uint16_t v_max_mV;
     uint16_t v_mean_mV;
     uint16_t ripple_mVpp;
-    uint32_t recovery_us;
+    uint16_t recovery_us;
 } adc_capture_stats_t;
