@@ -95,19 +95,6 @@ void init_gpio()
             gpio_put(pin, 0); // Start with VBUS off
         }
     }
-
-    // GPIO input for VBUS sense
-    for (uint8_t i = 0; i < MAX_PORTS; i++)
-    {
-        uint8_t pin = PORT_SENSE_PINS[i];
-        if (pin != 0)
-        {
-            gpio_init(pin);
-            gpio_set_dir(pin, GPIO_IN);
-            gpio_disable_pulls(pin);
-            gpio_set_input_hysteresis_enabled(pin, true);
-        }
-    }
 }
 
 void init_uart()
@@ -332,17 +319,31 @@ void vbus_set_activated(uint8_t port)
 
 void read_present_ports()
 {
-    g_port_map = 0;
-    g_port_count = 0;
-    for (uint8_t port = 0; port < MAX_PORTS; port++)
+    // Port 0 is always connected
+    g_port_map = 1;
+    g_port_count = 1;
+    load_set_mA(0); // Make sure there is no load
+
+    for (uint8_t port = 1; port < MAX_PORTS; port++)
     {
-        if (PORT_SENSE_PINS[port] != 0 && gpio_get(PORT_SENSE_PINS[port]))
+        if (PORT_VBUS_SWITCH_PINS[port] == 0)
+        {
+            continue;
+        }
+
+        vbus_set_activated(port);
+
+        sleep_ms(20);
+
+        if (read_vbus_mv() >= UNDERVOLT_LIMIT_MV)
         {
             print_fmt("Detected VBUS on port %d", port);
             g_port_map |= (1 << port);
             g_port_count++;
         }
     }
+
+    vbus_turn_off();
 
     print_fmt("Detected %d port(s)", g_port_count);
 }
@@ -492,7 +493,7 @@ void run_power_test(power_report_t *out_report)
 
     out_report->port = g_active_port;
     out_report->n_steps = steps_count;
-    out_report->maxpower_mA = 100;
+    out_report->maxpower_mA = 500;
 
     if (PORT_VBUS_SWITCH_PINS[g_active_port] == 0)
     {
@@ -755,6 +756,10 @@ void process_command(const char *cmd)
     {
         memset(&g_power_report, 0, sizeof(g_power_report));
         run_power_test(&g_power_report);
+    }
+    else if (strcmp(cmd, "sense") == 0)
+    {
+        read_present_ports();
     }
     else if (strcmp(cmd, "volt") == 0)
     {

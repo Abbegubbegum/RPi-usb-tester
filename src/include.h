@@ -38,12 +38,8 @@ enum
 
 #define MAX_PORTS 4
 
-static const uint8_t PORT_SENSE_PINS[] = {
-    14,
-    15, 13, 0};
-
 static const uint8_t PORT_VBUS_SWITCH_PINS[] = {
-    0, 10, 0, 0};
+    0, 10, 9, 0};
 
 #define VBUS_ADC_PIN 26
 #define VBUS_ADC_CHAN 0
