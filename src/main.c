@@ -77,27 +77,36 @@ void init_pwm()
 void init_gpio()
 {
     // GPIO pin for USB mux selection
-    gpio_init(USB_MUX_SEL_PIN);
-    gpio_set_dir(USB_MUX_SEL_PIN, GPIO_OUT);
-    gpio_put(USB_MUX_SEL_PIN, 0);
+    gpio_init(USB_MUX_SEL0_PIN);
+    gpio_set_dir(USB_MUX_SEL0_PIN, GPIO_OUT);
+    gpio_put(USB_MUX_SEL0_PIN, 0);
+    gpio_init(USB_MUX_SEL1_PIN);
+    gpio_set_dir(USB_MUX_SEL1_PIN, GPIO_OUT);
+    gpio_put(USB_MUX_SEL1_PIN, 0);
 
     // GPIO pins for switching VBUS
     for (uint8_t i = 0; i < MAX_PORTS; i++)
     {
         uint8_t pin = PORT_VBUS_SWITCH_PINS[i];
-        gpio_init(pin);
-        gpio_set_dir(pin, GPIO_OUT);
-        gpio_put(pin, 0); // Start with VBUS off
+        if (pin != 0)
+        {
+            gpio_init(pin);
+            gpio_set_dir(pin, GPIO_OUT);
+            gpio_put(pin, 0); // Start with VBUS off
+        }
     }
 
     // GPIO input for VBUS sense
     for (uint8_t i = 0; i < MAX_PORTS; i++)
     {
         uint8_t pin = PORT_SENSE_PINS[i];
-        gpio_init(pin);
-        gpio_set_dir(pin, GPIO_IN);
-        gpio_disable_pulls(pin);
-        gpio_set_input_hysteresis_enabled(pin, true);
+        if (pin != 0)
+        {
+            gpio_init(pin);
+            gpio_set_dir(pin, GPIO_IN);
+            gpio_disable_pulls(pin);
+            gpio_set_input_hysteresis_enabled(pin, true);
+        }
     }
 }
 
@@ -180,18 +189,19 @@ int main(void)
 
 void usb_switch_to_port(uint8_t port)
 {
-    if (port > 1)
+    if (port > MAX_PORTS)
         return; // Invalid port
 
     tud_disconnect();
     sleep_ms(3); // Wait for host to notice disconnection
 
-    gpio_put(USB_MUX_SEL_PIN, port);
+    gpio_put(USB_MUX_SEL0_PIN, port & 1);
+    gpio_put(USB_MUX_SEL1_PIN, port & 2);
 
     sleep_ms(5); // Wait for the mux to switch
     tud_connect();
 
-    print_fmt("Switched USB MUX to port %d", port);
+    print_fmt("Switched USB MUX to %d%d port %d", port & 2, port & 1, port);
     g_active_port = port;
 }
 
@@ -215,7 +225,8 @@ void load_set_mA(uint16_t mA)
 {
     // Because of lifted ground issues, 100% duty cycle is closer to 450mA than 500mA
     // therefore 500/450 = 1.11 scale factor
-    float duty = (mA / 500.0f) * 1.11f;
+    // I needed a bit extra to compensate so 1.2 :)
+    float duty = (mA / 500.0f) * 1.2f;
 
     if (duty > 1.0f)
         duty = 1.0f;
@@ -291,10 +302,12 @@ uint16_t read_current_mA()
 
 void vbus_turn_off()
 {
-    // Start at 1 because port 0 doens't have a VBUS switch pin
-    for (int i = 1; i < MAX_PORTS; i++)
+    for (int port = 0; port < MAX_PORTS; port++)
     {
-        gpio_put(PORT_VBUS_SWITCH_PINS[i], 0);
+        if (PORT_VBUS_SWITCH_PINS[port] != 0)
+        {
+            gpio_put(PORT_VBUS_SWITCH_PINS[port], 0);
+        }
     }
 }
 
@@ -302,9 +315,9 @@ void vbus_set_activated(uint8_t port)
 {
     vbus_turn_off();
 
-    if (port == 0)
+    if (PORT_VBUS_SWITCH_PINS[port] == 0)
     {
-        print_fmt("can't set port 0 as activated VBUS");
+        print_fmt("can't set port %d as activated VBUS", port);
         return;
     }
 
@@ -323,7 +336,7 @@ void read_present_ports()
     g_port_count = 0;
     for (uint8_t port = 0; port < MAX_PORTS; port++)
     {
-        if (gpio_get(PORT_SENSE_PINS[port]))
+        if (PORT_SENSE_PINS[port] != 0 && gpio_get(PORT_SENSE_PINS[port]))
         {
             print_fmt("Detected VBUS on port %d", port);
             g_port_map |= (1 << port);
@@ -481,9 +494,9 @@ void run_power_test(power_report_t *out_report)
     out_report->n_steps = steps_count;
     out_report->maxpower_mA = 100;
 
-    if (g_active_port == 0)
+    if (PORT_VBUS_SWITCH_PINS[g_active_port] == 0)
     {
-        print_fmt("Can't run power test on port 0");
+        print_fmt("Can't run power test on port %d", g_active_port);
         out_report->flags |= (1u << 2); // cant_load
         return;
     }
@@ -717,6 +730,10 @@ void process_command(const char *cmd)
     if (strcmp(cmd, "set 1") == 0)
     {
         usb_switch_to_port(1);
+    }
+    else if (strcmp(cmd, "set 2") == 0)
+    {
+        usb_switch_to_port(2);
     }
     else if (strcmp(cmd, "set 0") == 0)
     {
