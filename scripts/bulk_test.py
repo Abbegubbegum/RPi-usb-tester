@@ -272,6 +272,8 @@ def main():
         # Small pause between ports
         time.sleep(0.05)
 
+    set_port_and_reopen(dev, intf_num, 0)
+
     # Print a compact summary
     summary = {
         "tested_ports": ports,

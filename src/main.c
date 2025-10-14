@@ -333,7 +333,7 @@ void read_present_ports()
 
         vbus_set_activated(port);
 
-        sleep_ms(20);
+        sleep_ms(50);
 
         if (read_vbus_mv() >= UNDERVOLT_LIMIT_MV)
         {
