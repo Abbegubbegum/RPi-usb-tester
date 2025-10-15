@@ -17,6 +17,8 @@
 
 #include "include.h"
 
+#define DEBUG
+
 static uint8_t g_vnd_buffer[2048];
 static uint16_t g_vnd_buflen = 0;
 static uint16_t g_vnd_expected_packet_size = 0;
@@ -48,6 +50,7 @@ void pwm_set_duty_frac(uint8_t pin, float frac);
 
 void print_fmt(const char *fmt, ...)
 {
+#ifdef DEBUG
     char buf[64];
 
     va_list args;
@@ -60,6 +63,7 @@ void print_fmt(const char *fmt, ...)
         uart_puts(UART_ID, buf);
         uart_puts(UART_ID, "\r\n");
     }
+#endif
 }
 
 void init_pwm()
