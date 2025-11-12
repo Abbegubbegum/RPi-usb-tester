@@ -221,10 +221,9 @@ void pwm_set_duty_frac(uint8_t pin, float frac)
 
 void load_set_mA(uint16_t mA)
 {
-    // Because of lifted ground issues, 100% duty cycle is closer to 450mA than 500mA
-    // therefore 500/450 = 1.11 scale factor
-    // I needed a bit extra to compensate so 1.2 :)
-    float duty = (mA / 500.0f) * 1.2f;
+    // Load is a 0.51R resistor
+    // 5V at 100% duty cycle = 500mA
+    float duty = (mA / 500.0f);
 
     if (duty > 1.0f)
         duty = 1.0f;
@@ -352,7 +351,8 @@ void read_present_ports()
 
         print_fmt("Checking port %d...", port);
         vbus_set_activated(port);
-        busy_wait_ms(50);
+        // Long pause is needed for decoupling cap to discharge
+        busy_wait_ms(500);
 
         if (read_vbus_mv() >= UNDERVOLT_LIMIT_MV)
         {
