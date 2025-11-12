@@ -125,6 +125,12 @@ void init_adc_dma()
 
     g_adc_sample_buf = (uint16_t *)calloc(g_adc_samples_per_window, sizeof(uint16_t));
 
+    if (g_adc_sample_buf == NULL)
+    {
+        print_fmt("init_adc_dma: ERROR - calloc FAILED!");
+        return;
+    }
+
     adc_init();
     adc_gpio_init(VBUS_ADC_PIN);
     adc_select_input(VBUS_ADC_CHAN);
@@ -159,10 +165,11 @@ int main(void)
     init_gpio();
     init_uart();
     init_pwm();
-
     init_adc_dma();
 
-    watchdog_enable(4000, 1); // 2 second timeout
+    watchdog_enable(4000, 1); // 4 second timeout
+    print_fmt("System ready");
+
     // main run loop
     while (1)
     {
@@ -184,15 +191,15 @@ void usb_switch_to_port(uint8_t port)
         return; // Invalid port
 
     tud_disconnect();
-    sleep_ms(3); // Wait for host to notice disconnection
+    busy_wait_ms(3); // Wait for host to notice disconnection
 
     gpio_put(USB_MUX_SEL0_PIN, port & 1);
     gpio_put(USB_MUX_SEL1_PIN, port & 2);
 
-    sleep_ms(5); // Wait for the mux to switch
+    busy_wait_ms(5); // Wait for the mux to switch
     tud_connect();
 
-    print_fmt("Switched USB MUX to %d%d port %d", port & 2, port & 1, port);
+    print_fmt("Switched USB MUX to port %d", port);
     g_active_port = port;
 }
 
@@ -235,7 +242,7 @@ void load_ramp_to_mA(uint16_t target_mA, uint32_t ramp_us)
     {
         uint16_t mA = g_current_load + step_delta;
         load_set_mA(mA);
-        sleep_us(1000);
+        busy_wait_ms(1);
     }
 }
 
@@ -304,6 +311,12 @@ void vbus_turn_off()
 
 void vbus_set_activated(uint8_t port)
 {
+    if (port >= MAX_PORTS)
+    {
+        print_fmt("ERROR: Invalid port %d", port);
+        return;
+    }
+
     vbus_turn_off();
 
     if (PORT_VBUS_SWITCH_PINS[port] == 0)
@@ -312,17 +325,19 @@ void vbus_set_activated(uint8_t port)
         return;
     }
 
-    sleep_us(100);
+    busy_wait_ms(1);
 
     gpio_put(PORT_VBUS_SWITCH_PINS[port], 1);
-
     print_fmt("VBUS %d ON", port);
 
-    sleep_us(100);
+    busy_wait_ms(1);
 }
 
 void read_present_ports()
 {
+    print_fmt("Sensing ports...");
+    watchdog_update();
+
     // Port 0 is always connected
     g_port_map = 1;
     g_port_count = 1;
@@ -330,14 +345,14 @@ void read_present_ports()
 
     for (uint8_t port = 1; port < MAX_PORTS; port++)
     {
+        watchdog_update(); // Update watchdog in the loop
+
         if (PORT_VBUS_SWITCH_PINS[port] == 0)
-        {
             continue;
-        }
 
+        print_fmt("Checking port %d...", port);
         vbus_set_activated(port);
-
-        sleep_ms(50);
+        busy_wait_ms(50);
 
         if (read_vbus_mv() >= UNDERVOLT_LIMIT_MV)
         {
@@ -348,8 +363,8 @@ void read_present_ports()
     }
 
     vbus_turn_off();
-
     print_fmt("Detected %d port(s)", g_port_count);
+    watchdog_update();
 }
 
 bool usb_probe_port(uint8_t port)
@@ -732,6 +747,8 @@ void service_vendor()
 
 void process_command(const char *cmd)
 {
+    print_fmt("CMD: %s", cmd);
+
     if (strcmp(cmd, "set 1") == 0)
     {
         usb_switch_to_port(1);
@@ -801,14 +818,14 @@ void process_command(const char *cmd)
     else if (strcmp(cmd, "rst") == 0)
     {
         print_fmt("Restarting...");
-        sleep_ms(100); // Give time for message to be sent
+        busy_wait_ms(100); // Give time for message to be sent
         // Restart without entering bootloader
         watchdog_reboot(0, 0, 0);
     }
     else if (strcmp(cmd, "prg") == 0)
     {
         print_fmt("Rebooting into bootloader...");
-        sleep_ms(100); // Give time for message to be sent
+        busy_wait_ms(100); // Give time for message to be sent
         reset_usb_boot(0, 0);
     }
     else

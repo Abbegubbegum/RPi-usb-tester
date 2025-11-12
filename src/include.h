@@ -27,8 +27,8 @@ enum
 
 // ------------------------
 
-#define USB_MUX_SEL0_PIN 20
-#define USB_MUX_SEL1_PIN 21
+#define USB_MUX_SEL0_PIN 13
+#define USB_MUX_SEL1_PIN 14
 
 #define UART_ID uart0
 #define BAUD_RATE 115200u
@@ -39,7 +39,7 @@ enum
 #define MAX_PORTS 4
 
 static const uint8_t PORT_VBUS_SWITCH_PINS[] = {
-    0, 10, 9, 0};
+    0, 11, 10, 9};
 
 #define VBUS_ADC_PIN 26
 #define VBUS_ADC_CHAN 0
@@ -52,7 +52,7 @@ static const uint8_t PORT_VBUS_SWITCH_PINS[] = {
 #define ADC_MAX 4095u
 
 #define PWM_WRAP 499u
-#define PWM_PIN 4
+#define PWM_PIN 3
 
 #define CURRENT_MEAS_PIN 27
 #define CURRENT_MEAS_ADC_CHAN 1
