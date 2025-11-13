@@ -33,12 +33,17 @@ static uint8_t g_pending_port = 0;
 static char g_cmd_buffer[CMD_BUFFER_SIZE];
 static uint8_t g_cmd_buflen = 0;
 
-static uint16_t g_current_load = 0;
-
 static int g_dma_chan = -1;
 static uint16_t *g_adc_sample_buf = NULL;
 
+// Storage for ADC samples from all load steps (idle + 5 load steps = 6 total)
+#define MAX_ADC_CAPTURE_STEPS 6
+static uint16_t *g_adc_all_samples[MAX_ADC_CAPTURE_STEPS] = {NULL};
+static uint8_t g_adc_capture_count = 0;
+
 static power_report_t g_power_report;
+static bool g_adc_samples_ready = false;
+static uint32_t g_adc_samples_sent = 0;
 
 void service_vendor();
 void on_uart_rx();
@@ -122,6 +127,17 @@ void init_adc_dma()
     {
         print_fmt("init_adc_dma: ERROR - calloc FAILED!");
         return;
+    }
+
+    // Allocate buffers for storing ADC samples from all load steps
+    for (int i = 0; i < MAX_ADC_CAPTURE_STEPS; i++)
+    {
+        g_adc_all_samples[i] = (uint16_t *)calloc(ADC_SAMPLES_PER_WINDOW, sizeof(uint16_t));
+        if (g_adc_all_samples[i] == NULL)
+        {
+            print_fmt("init_adc_dma: ERROR - calloc for step %d FAILED!", i);
+            return;
+        }
     }
 
     adc_init();
@@ -214,28 +230,23 @@ void pwm_set_duty_frac(uint8_t pin, float frac)
 
 void load_set_mA(uint16_t mA)
 {
-    // Load is a 0.51R resistor
-    // 5V at 100% duty cycle = 500mA
+    // 5V at 100% duty cycle is calibrated to be 500mA
     float duty = (mA / 500.0f);
 
     if (duty > 1.0f)
         duty = 1.0f;
 
     pwm_set_duty_frac(PWM_PIN, duty);
-    g_current_load = mA;
 }
 
-void load_ramp_to_mA(uint16_t target_mA, uint32_t ramp_us)
+void load_set_pct(uint16_t percent)
 {
-    const uint32_t steps = ramp_us / 1000u + 1u;
-    int32_t step_delta = ((int32_t)target_mA - (int32_t)g_current_load) / (int32_t)steps;
-    print_fmt("Target: %d, current:%d, steps:%d, delta:%d", target_mA, g_current_load, steps, step_delta);
-    for (uint32_t i = 1; i <= steps; i++)
-    {
-        uint16_t mA = g_current_load + step_delta;
-        load_set_mA(mA);
-        busy_wait_ms(1);
-    }
+    float duty = percent / 100.0f;
+
+    if (duty > 1.0f)
+        duty = 1.0f;
+
+    pwm_set_duty_frac(PWM_PIN, duty);
 }
 
 uint16_t adc_code_to_mV(uint16_t code)
@@ -347,7 +358,7 @@ void read_present_ports()
         // Long pause is needed for decoupling cap to discharge
         busy_wait_ms(50);
 
-        if (read_vbus_mv() >= UNDERVOLT_LIMIT_MV)
+        if (read_vbus_mv() >= UNDERVOLT_LIMIT_IDLE_MV)
         {
             print_fmt("Detected VBUS on port %d", port);
             g_port_map |= (1 << port);
@@ -417,54 +428,46 @@ static inline uint16_t clamp_u16(int v)
 void compute_stats_from_run(adc_capture_stats_t *s_out)
 {
     // Convert on the fly; do two passes:
-    // Pass 1: transient (0..g_adc_samples_transient-1) for v_min & recovery
+    // Pass 1: transient (0..g_adc_samples_transient-1) for v_min
     // Pass 2: steady (g_adc_samples_transient..n-1) for mean and ripple
     uint32_t steady_vmin = 0xFFFFFFFFu;
     uint32_t steady_vmax = 0;
 
+    uint32_t total_vmin = 0xFFFFFFFFu;
+
     // Steady window
     uint32_t steady_sample_count = ADC_SAMPLES_PER_WINDOW - ADC_TRANSIENT_SAMPLE_COUNT;
-    uint64_t sum = 0;
+    uint64_t steady_sum = 0;
 
-    for (uint32_t i = ADC_TRANSIENT_SAMPLE_COUNT; i < ADC_SAMPLES_PER_WINDOW; ++i)
+    for (uint32_t i = 0; i < ADC_SAMPLES_PER_WINDOW; ++i)
     {
         uint32_t mv = adc_code_to_vbus_mV(g_adc_sample_buf[i]);
-        sum += mv;
-        if (mv < steady_vmin)
-            steady_vmin = mv;
-        if (mv > steady_vmax)
-            steady_vmax = mv;
-    }
-    uint32_t total_vmin = steady_vmin;
-    uint32_t total_vmax = steady_vmax;
-
-    uint32_t mean = (uint32_t)(sum / (uint64_t)steady_sample_count);
-    uint32_t ripple = steady_vmax - steady_vmin;
-
-    // Recovery time: first index in transient where VBUS >= (mean - VRECOV_THRESH_MV)
-    uint32_t thresh = mean - VRECOV_THRESH_MV;
-    uint32_t rec_idx = ADC_TRANSIENT_SAMPLE_COUNT; // default: within steady window
-    for (uint32_t i = 0; i < ADC_TRANSIENT_SAMPLE_COUNT && i < ADC_SAMPLES_PER_WINDOW; ++i)
-    {
-        uint32_t mv = adc_code_to_vbus_mV(g_adc_sample_buf[i]);
-        if (mv < total_vmin)
-            total_vmin = mv;
-        if (mv > total_vmax)
-            total_vmax = mv;
-
-        if (mv >= thresh)
+        // If we are in the transient
+        if (i < ADC_TRANSIENT_SAMPLE_COUNT)
         {
-            rec_idx = i;
-            break;
+            if (mv < total_vmin)
+                total_vmin = mv;
+        }
+        // Else we are in the stable region
+        else
+        {
+            steady_sum += mv;
+            if (mv < steady_vmin)
+            {
+                steady_vmin = mv;
+                total_vmin = MIN(total_vmin, steady_vmin);
+            }
+            if (mv > steady_vmax)
+                steady_vmax = mv;
         }
     }
-    uint16_t rec_us = (rec_idx * 1000000u) / ADC_SAMPLE_RATE_HZ;
+
+    uint32_t mean = (uint32_t)(steady_sum / (uint64_t)steady_sample_count);
+    uint32_t ripple = steady_vmax - steady_vmin;
 
     s_out->v_min_mV = clamp_u16((int)total_vmin);
-    s_out->v_max_mV = clamp_u16((int)total_vmax);
     s_out->v_mean_mV = clamp_u16((int)mean);
     s_out->ripple_mVpp = clamp_u16((int)ripple);
-    s_out->recovery_us = clamp_u16((int)rec_us);
 }
 
 void adc_dma_capture_window_blocking()
@@ -495,17 +498,13 @@ void adc_dma_capture_window_blocking()
 
 void run_power_test(power_report_t *out_report)
 {
-
-    uint8_t steps_count = 5;
-    uint16_t steps_mA[5] = {100, 200, 300, 400, 500};
-
     load_set_mA(0);
 
     memset(out_report, 0, sizeof(*out_report));
+    g_adc_capture_count = 0; // Reset capture count
 
     out_report->port = g_active_port;
-    out_report->n_steps = steps_count;
-    out_report->maxpower_mA = 500;
+    out_report->n_steps = 5;
 
     if (PORT_VBUS_SWITCH_PINS[g_active_port] == 0)
     {
@@ -516,7 +515,16 @@ void run_power_test(power_report_t *out_report)
 
     vbus_set_activated(g_active_port);
 
+    // Initial idle measurement (before any load testing)
+    busy_wait_ms(100); // Allow VBUS to fully stabilize
     adc_dma_capture_window_blocking();
+
+    // Save idle samples (step 0)
+    if (g_adc_capture_count < MAX_ADC_CAPTURE_STEPS)
+    {
+        memcpy(g_adc_all_samples[g_adc_capture_count], g_adc_sample_buf, ADC_SAMPLES_PER_WINDOW * sizeof(uint16_t));
+        g_adc_capture_count++;
+    }
 
     adc_capture_stats_t s0;
     compute_stats_from_run(&s0);
@@ -525,7 +533,7 @@ void run_power_test(power_report_t *out_report)
     print_fmt("IDLE: %dmV", s0.v_mean_mV);
 
     // If VBUS missing, flag & bail with partial report
-    if (out_report->v_idle_mV < UNDERVOLT_LIMIT_MV)
+    if (out_report->v_idle_mV < UNDERVOLT_LIMIT_IDLE_MV)
     {
         print_fmt("VBUS too low, exiting");
         out_report->flags |= (1u << 0); // vbus_missing
@@ -533,36 +541,61 @@ void run_power_test(power_report_t *out_report)
     }
 
     uint16_t max_current_ok = 0;
-    bool ocp = false;
-    uint16_t ocp_at = 0;
+    bool undervolt = false;
+    uint16_t undervolt_at = 0;
 
-    for (uint8_t i = 0; i < steps_count; i++)
+    for (uint8_t i = 0; i < 5; i++)
     {
-        uint16_t req_mA = steps_mA[i];
-        out_report->loads_mA[i] = req_mA;
+        uint8_t load_pct = (i + 1) * 20; // 20%, 40%, 60%, 80%, 100%
+        out_report->load_pct[i] = load_pct;
 
-        load_ramp_to_mA(req_mA, 2000);
+        // Turn off load completely and wait for VBUS to recover to idle voltage
+        load_set_mA(0);
+        busy_wait_ms(100); // Wait for capacitors to recharge and voltage to stabilize
 
+        // Apply load step instantly (no ramping) to measure true transient response
+        // The ADC capture will begin immediately as load is applied
+        load_set_pct(load_pct);
+
+        // Capture the transient response (first ~15ms) and steady state (~105ms)
         adc_dma_capture_window_blocking();
+
+        // Save load step samples (steps 1-5)
+        if (g_adc_capture_count < MAX_ADC_CAPTURE_STEPS)
+        {
+            memcpy(g_adc_all_samples[g_adc_capture_count], g_adc_sample_buf, ADC_SAMPLES_PER_WINDOW * sizeof(uint16_t));
+            g_adc_capture_count++;
+        }
 
         adc_capture_stats_t s;
         compute_stats_from_run(&s);
         uint16_t current = read_current_mA();
 
         out_report->v_min_mV[i] = s.v_min_mV;
-        out_report->v_max_mV[i] = s.v_max_mV;
         out_report->v_mean_mV[i] = s.v_mean_mV;
         out_report->ripple_mVpp[i] = s.ripple_mVpp;
         out_report->droop_mV[i] = (out_report->v_idle_mV > s.v_min_mV) ? (out_report->v_idle_mV - s.v_min_mV) : 0;
-        out_report->recovery_us[i] = s.recovery_us;
         out_report->current_mA[i] = current;
 
-        print_fmt("LOAD: %dmA, V: %dmV", current, s.v_mean_mV);
-
-        if (s.v_mean_mV < UNDERVOLT_LIMIT_MV)
+        // Calculate effective resistance: R = V / I (in milliohms)
+        // R(mΩ) = droop(mV) / current(mA) * 1000
+        if (current > 0)
         {
-            ocp = true;
-            ocp_at = req_mA;
+            uint32_t resistance = ((uint32_t)out_report->droop_mV[i] * 1000) / current;
+            out_report->resistance_mOhm[i] = (resistance > 0xFFFF) ? 0xFFFF : (uint16_t)resistance;
+        }
+        else
+        {
+            out_report->resistance_mOhm[i] = 0;
+        }
+
+        print_fmt("LOAD: %d%% (%dmA), V: %dmV, Droop: %dmV, R: %dmOhm",
+                  load_pct, current, s.v_mean_mV, out_report->droop_mV[i], out_report->resistance_mOhm[i]);
+
+        if (s.v_mean_mV < UNDERVOLT_LIMIT_LOAD_MV)
+        {
+            undervolt = true;
+            undervolt_at = load_pct;
             break;
         }
 
@@ -573,10 +606,10 @@ void run_power_test(power_report_t *out_report)
     vbus_turn_off();
 
     out_report->max_current_mA = max_current_ok;
-    if (ocp)
+    if (undervolt)
     {
-        out_report->flags |= (1u << 1); // ocp
-        out_report->ocp_at_mA = ocp_at;
+        out_report->flags |= (1u << 1);
+        out_report->undervolt_at_pct = undervolt_at;
     }
 
     print_fmt("Finished");
@@ -649,6 +682,7 @@ enum
     REQ_SET_PORT = 0x02,
     REQ_GET_POWER = 0x03,
     REQ_GET_PORTMAP = 0x10,
+    REQ_GET_ADC_SAMPLES = 0x04,
 };
 
 bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *request)
@@ -685,7 +719,7 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
         // GET_POWER
         memset(&g_power_report, 0, sizeof(g_power_report));
         run_power_test(&g_power_report);
-        _Static_assert(sizeof(power_report_t) == 93, "power_report_t size changed!"); // This is because the size is hardcoded in python
+        _Static_assert(sizeof(power_report_t) == 81, "power_report_t size changed!"); // This is because the size is hardcoded in python
         return tud_control_xfer(rhport, request, &g_power_report, sizeof(g_power_report));
     }
     case REQ_GET_PORTMAP:
@@ -693,6 +727,13 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
         // GET_PORTMAP
         read_present_ports();
         return tud_control_xfer(rhport, request, &g_port_map, 1);
+    }
+    case REQ_GET_ADC_SAMPLES:
+    {
+        // GET_ADC_SAMPLES - trigger bulk transfer of ADC samples
+        print_fmt("ADC samples request");
+        g_adc_samples_ready = true;
+        return tud_control_status(rhport, request);
     }
     default:
         // stall unknown request
@@ -703,6 +744,43 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
 
 void service_vendor()
 {
+    // Handle ADC samples bulk transfer - send all captured steps
+    if (g_adc_samples_ready)
+    {
+        uint32_t bytes_per_step = ADC_SAMPLES_PER_WINDOW * sizeof(uint16_t);
+        uint32_t total_bytes = g_adc_capture_count * bytes_per_step;
+
+        if (g_adc_samples_sent == 0)
+        {
+            print_fmt("Starting ADC transfer: %d steps, %d bytes", g_adc_capture_count, total_bytes);
+        }
+
+        // Send as much as possible
+        if (g_adc_samples_sent < total_bytes && tud_vendor_write_available() > 0)
+        {
+            // Determine which step and offset we're on
+            uint32_t step_idx = g_adc_samples_sent / bytes_per_step;
+            uint32_t step_offset = g_adc_samples_sent % bytes_per_step;
+
+            if (step_idx < g_adc_capture_count)
+            {
+                uint32_t remaining_in_step = bytes_per_step - step_offset;
+                uint8_t *src = ((uint8_t *)g_adc_all_samples[step_idx]) + step_offset;
+                uint32_t written = tud_vendor_write(src, remaining_in_step);
+                g_adc_samples_sent += written;
+            }
+
+            // If we've sent everything, reset for next transfer
+            if (g_adc_samples_sent >= total_bytes)
+            {
+                tud_vendor_flush();
+                print_fmt("ADC transfer complete: %d bytes", g_adc_samples_sent);
+                g_adc_samples_ready = false;
+                g_adc_samples_sent = 0;
+            }
+        }
+    }
+
     while (tud_vendor_available())
     {
         // Read as much data as we can into the vnd_buffer

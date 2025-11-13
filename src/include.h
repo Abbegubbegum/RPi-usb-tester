@@ -43,8 +43,8 @@ static const uint8_t PORT_VBUS_SWITCH_PINS[] = {
 
 #define VBUS_ADC_PIN 26
 #define VBUS_ADC_CHAN 0
-#define VBUS_DIV_R1 675u
-#define VBUS_DIV_R2 990u
+#define VBUS_DIV_R1 68u
+#define VBUS_DIV_R2 100u
 
 #define CMD_BUFFER_SIZE 32
 
@@ -65,36 +65,31 @@ static const uint8_t PORT_VBUS_SWITCH_PINS[] = {
 #define ADC_SAMPLES_PER_WINDOW (ADC_SAMPLE_PER_MS * STEP_WINDOW_MS)
 #define ADC_TRANSIENT_SAMPLE_COUNT (ADC_SAMPLE_PER_MS * TRANSIENT_MS)
 
-// Power testing limits
-#define VRECOV_THRESH_MV 10     // recovery threshold from mean (10 mV)
-#define UNDERVOLT_LIMIT_MV 4350 // “USB unhealthy” floor
+#define UNDERVOLT_LIMIT_IDLE_MV 4800 // Minimum VBUS to consider port functional
+#define UNDERVOLT_LIMIT_LOAD_MV 4000 // Limit for the drop during load, more lenient because of resistance in load path
 
 //  ========= TYPES =============
 typedef struct __attribute__((packed))
 {
     uint8_t port;
     uint8_t n_steps;
-    uint8_t flags;
-    uint16_t maxpower_mA;
+    uint8_t flags; // bit 0: vbus_missing, bit 1: undervolt
     uint16_t v_idle_mV;
-    uint16_t loads_mA[5];
+    uint16_t load_pct[5]; // Load percentage (20%, 40%, 60%, 80%, 100% where 100% = 500mA)
     uint16_t v_mean_mV[5];
-    uint16_t v_min_mV[5];
-    uint16_t v_max_mV[5];
-    uint16_t droop_mV[5];
-    uint16_t ripple_mVpp[5];
-    uint16_t current_mA[5];
-    uint16_t recovery_us[5];
-    uint16_t max_current_mA;
-    uint16_t ocp_at_mA;
+    uint16_t v_min_mV[5];        // Minimum voltage during load (includes transient)
+    uint16_t droop_mV[5];        // v_idle - v_min (total voltage drop)
+    uint16_t ripple_mVpp[5];     // Voltage noise during steady-state
+    uint16_t current_mA[5];      // Measured current draw
+    uint16_t resistance_mOhm[5]; // Calculated resistance: droop_mV / current_mA (in milliohms)
+    uint16_t max_current_mA;     // Highest current successfully delivered
+    uint16_t undervolt_at_pct;   // Load where undervolt occurred
     uint16_t errors;
 } power_report_t;
 
 typedef struct
 {
     uint16_t v_min_mV;
-    uint16_t v_max_mV;
     uint16_t v_mean_mV;
     uint16_t ripple_mVpp;
-    uint16_t recovery_us;
 } adc_capture_stats_t;
