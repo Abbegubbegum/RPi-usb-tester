@@ -37,9 +37,6 @@ static uint16_t g_current_load = 0;
 
 static int g_dma_chan = -1;
 static uint16_t *g_adc_sample_buf = NULL;
-static uint32_t g_adc_samples_per_ms = 0;
-static uint32_t g_adc_samples_per_window = 0;
-static uint32_t g_adc_samples_transient = 0;
 
 static power_report_t g_power_report;
 
@@ -119,11 +116,7 @@ void init_uart()
 // This is for the VBUS sensing and Current sensing
 void init_adc_dma()
 {
-    g_adc_samples_per_ms = ADC_SAMPLE_RATE_HZ / 1000u;
-    g_adc_samples_per_window = g_adc_samples_per_ms * STEP_WINDOW_MS;
-    g_adc_samples_transient = g_adc_samples_per_ms * TRANSIENT_MS;
-
-    g_adc_sample_buf = (uint16_t *)calloc(g_adc_samples_per_window, sizeof(uint16_t));
+    g_adc_sample_buf = (uint16_t *)calloc(ADC_SAMPLES_PER_WINDOW, sizeof(uint16_t));
 
     if (g_adc_sample_buf == NULL)
     {
@@ -352,7 +345,7 @@ void read_present_ports()
         print_fmt("Checking port %d...", port);
         vbus_set_activated(port);
         // Long pause is needed for decoupling cap to discharge
-        busy_wait_ms(500);
+        busy_wait_ms(50);
 
         if (read_vbus_mv() >= UNDERVOLT_LIMIT_MV)
         {
@@ -430,10 +423,10 @@ void compute_stats_from_run(adc_capture_stats_t *s_out)
     uint32_t steady_vmax = 0;
 
     // Steady window
-    uint32_t steady_sample_count = g_adc_samples_per_window - g_adc_samples_transient;
+    uint32_t steady_sample_count = ADC_SAMPLES_PER_WINDOW - ADC_TRANSIENT_SAMPLE_COUNT;
     uint64_t sum = 0;
 
-    for (uint32_t i = g_adc_samples_transient; i < g_adc_samples_per_window; ++i)
+    for (uint32_t i = ADC_TRANSIENT_SAMPLE_COUNT; i < ADC_SAMPLES_PER_WINDOW; ++i)
     {
         uint32_t mv = adc_code_to_vbus_mV(g_adc_sample_buf[i]);
         sum += mv;
@@ -450,8 +443,8 @@ void compute_stats_from_run(adc_capture_stats_t *s_out)
 
     // Recovery time: first index in transient where VBUS >= (mean - VRECOV_THRESH_MV)
     uint32_t thresh = mean - VRECOV_THRESH_MV;
-    uint32_t rec_idx = g_adc_samples_transient; // default: within steady window
-    for (uint32_t i = 0; i < g_adc_samples_transient && i < g_adc_samples_per_window; ++i)
+    uint32_t rec_idx = ADC_TRANSIENT_SAMPLE_COUNT; // default: within steady window
+    for (uint32_t i = 0; i < ADC_TRANSIENT_SAMPLE_COUNT && i < ADC_SAMPLES_PER_WINDOW; ++i)
     {
         uint32_t mv = adc_code_to_vbus_mV(g_adc_sample_buf[i]);
         if (mv < total_vmin)
@@ -484,9 +477,9 @@ void adc_dma_capture_window_blocking()
     channel_config_set_transfer_data_size(&c, DMA_SIZE_16);
 
     dma_channel_configure(g_dma_chan, &c,
-                          g_adc_sample_buf,         // write addr
-                          &adc_hw->fifo,            // read addr
-                          g_adc_samples_per_window, // number of samples
+                          g_adc_sample_buf,       // write addr
+                          &adc_hw->fifo,          // read addr
+                          ADC_SAMPLES_PER_WINDOW, // number of samples
                           false);
     adc_select_input(VBUS_ADC_CHAN);
     adc_fifo_drain();

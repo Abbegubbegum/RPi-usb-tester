@@ -57,12 +57,17 @@ static const uint8_t PORT_VBUS_SWITCH_PINS[] = {
 #define CURRENT_MEAS_PIN 27
 #define CURRENT_MEAS_ADC_CHAN 1
 
-// Power testing
-#define ADC_SAMPLE_RATE_HZ 80000u // 80 kS/s
-#define STEP_WINDOW_MS 120u       // per load step
+// Power testing measurment
+#define STEP_WINDOW_MS 120u       // Measurment time per load step
 #define TRANSIENT_MS 20u          // first 20 ms used for droop/recovery
-#define VRECOV_THRESH_MV 10       // recovery threshold from mean (10 mV)
-#define UNDERVOLT_LIMIT_MV 4350   // “USB unhealthy” floor
+#define ADC_SAMPLE_RATE_HZ 80000u // 80 kS/s
+#define ADC_SAMPLE_PER_MS (ADC_SAMPLE_RATE_HZ / 1000u)
+#define ADC_SAMPLES_PER_WINDOW (ADC_SAMPLE_PER_MS * STEP_WINDOW_MS)
+#define ADC_TRANSIENT_SAMPLE_COUNT (ADC_SAMPLE_PER_MS * TRANSIENT_MS)
+
+// Power testing limits
+#define VRECOV_THRESH_MV 10     // recovery threshold from mean (10 mV)
+#define UNDERVOLT_LIMIT_MV 4350 // “USB unhealthy” floor
 
 //  ========= TYPES =============
 typedef struct __attribute__((packed))
