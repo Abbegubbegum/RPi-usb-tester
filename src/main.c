@@ -45,10 +45,16 @@ static power_report_t g_power_report;
 static bool g_adc_samples_ready = false;
 static uint32_t g_adc_samples_sent = 0;
 
+// VBUS monitoring for beep on plug-in
+static uint32_t g_last_vbus_check_ms = 0;
+static uint8_t g_vbus_present_map = 0; // Bitmap of which ports currently have VBUS
+
 void service_vendor();
 void on_uart_rx();
 void read_present_ports();
 void pwm_set_duty_frac(uint8_t pin, float frac);
+void buzzer_beep(uint16_t duration_ms);
+void check_vbus_changes();
 
 void print_fmt(const char *fmt, ...)
 {
@@ -101,6 +107,23 @@ void init_gpio()
             gpio_put(pin, 0); // Start with VBUS off
         }
     }
+
+    // GPIO pins for port passed LEDs
+    for (uint8_t i = 0; i < MAX_PORTS; i++)
+    {
+        uint8_t pin = PORT_PASSED_LED_PINS[i];
+        if (pin != 0)
+        {
+            gpio_init(pin);
+            gpio_set_dir(pin, GPIO_OUT);
+            gpio_put(pin, 0); // Start with LEDs off
+        }
+    }
+
+    // GPIO pin for buzzer
+    gpio_init(BUZZER_EN_PIN);
+    gpio_set_dir(BUZZER_EN_PIN, GPIO_OUT);
+    gpio_put(BUZZER_EN_PIN, 0); // Start with buzzer off
 }
 
 void init_uart()
@@ -187,6 +210,14 @@ int main(void)
 
         service_vendor();
 
+        // Periodically check for new ports with VBUS and beep if detected
+        uint32_t now_ms = board_millis();
+        if (now_ms - g_last_vbus_check_ms >= VBUS_CHECK_INTERVAL_MS)
+        {
+            check_vbus_changes();
+            g_last_vbus_check_ms = now_ms;
+        }
+
         watchdog_update();
     }
 
@@ -224,8 +255,13 @@ void pwm_set_duty_frac(uint8_t pin, float frac)
     uint16_t level = (uint16_t)lroundf(frac * PWM_WRAP);
 
     pwm_set_gpio_level(pin, level);
+}
 
-    print_fmt("Set PWM duty cycle to %.1f", frac * 100);
+void buzzer_beep(uint16_t duration_ms)
+{
+    gpio_put(BUZZER_EN_PIN, 1);
+    busy_wait_ms(duration_ms);
+    gpio_put(BUZZER_EN_PIN, 0);
 }
 
 void load_set_mA(uint16_t mA)
@@ -277,17 +313,12 @@ uint16_t read_adc_mv(uint channel)
 
     uint16_t mv = adc_code_to_mV(avg);
 
-    print_fmt("CHAN%d: %dmV", channel, mv);
-
     return mv;
 }
 
 uint16_t read_vbus_mv()
 {
     uint16_t mv = convert_mv_res_divider(read_adc_mv(VBUS_ADC_CHAN), VBUS_DIV_R1, VBUS_DIV_R2);
-
-    // Print
-    print_fmt("VBUS: %dmV", mv);
     return mv;
 }
 
@@ -296,8 +327,6 @@ uint16_t read_current_mA()
     uint16_t mv = read_adc_mv(CURRENT_MEAS_ADC_CHAN);
 
     uint16_t mA = mv / (0.51f * 13.2f);
-
-    print_fmt("CURRENT: %dmA", mA);
     return mA;
 }
 
@@ -316,7 +345,6 @@ void vbus_set_activated(uint8_t port)
 {
     if (port >= MAX_PORTS)
     {
-        print_fmt("ERROR: Invalid port %d", port);
         return;
     }
 
@@ -324,21 +352,18 @@ void vbus_set_activated(uint8_t port)
 
     if (PORT_VBUS_SWITCH_PINS[port] == 0)
     {
-        print_fmt("can't set port %d as activated VBUS", port);
         return;
     }
 
     busy_wait_ms(1);
 
     gpio_put(PORT_VBUS_SWITCH_PINS[port], 1);
-    print_fmt("VBUS %d ON", port);
 
     busy_wait_ms(1);
 }
 
 void read_present_ports()
 {
-    print_fmt("Sensing ports...");
     watchdog_update();
 
     // Port 0 is always connected
@@ -353,22 +378,35 @@ void read_present_ports()
         if (PORT_VBUS_SWITCH_PINS[port] == 0)
             continue;
 
-        print_fmt("Checking port %d...", port);
         vbus_set_activated(port);
         // Long pause is needed for decoupling cap to discharge
         busy_wait_ms(50);
 
         if (read_vbus_mv() >= UNDERVOLT_LIMIT_IDLE_MV)
         {
-            print_fmt("Detected VBUS on port %d", port);
             g_port_map |= (1 << port);
             g_port_count++;
         }
     }
 
     vbus_turn_off();
-    print_fmt("Detected %d port(s)", g_port_count);
     watchdog_update();
+}
+
+void check_vbus_changes()
+{
+    // Use the existing port sensing function to detect VBUS
+    uint8_t old_port_map = g_port_map;
+    read_present_ports();
+
+    // Detect new ports (bit changed from 0 to 1)
+    uint8_t newly_plugged = g_port_map & ~old_port_map;
+
+    if (newly_plugged != 0)
+    {
+        // At least one new port was plugged in, beep!
+        buzzer_beep(100); // 100ms beep
+    }
 }
 
 bool usb_probe_port(uint8_t port)
@@ -683,6 +721,7 @@ enum
     REQ_GET_POWER = 0x03,
     REQ_GET_PORTMAP = 0x10,
     REQ_GET_ADC_SAMPLES = 0x04,
+    REQ_SET_PORT_PASSED = 0x05,
 };
 
 bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *request)
@@ -733,6 +772,29 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
         // GET_ADC_SAMPLES - trigger bulk transfer of ADC samples
         print_fmt("ADC samples request");
         g_adc_samples_ready = true;
+        return tud_control_status(rhport, request);
+    }
+    case REQ_SET_PORT_PASSED:
+    {
+        // SET_PORT_PASSED - turn on LED for passed port
+        uint8_t port = (uint8_t)request->wValue;
+        if (port >= MAX_PORTS)
+        {
+            print_fmt("Invalid port %d for pass LED", port);
+            return false; // stall invalid port
+        }
+
+        uint8_t pin = PORT_PASSED_LED_PINS[port];
+        if (pin != 0)
+        {
+            gpio_put(pin, 1); // Turn on LED
+            print_fmt("Port %d marked as PASSED (LED ON)", port);
+        }
+        else
+        {
+            print_fmt("No LED pin configured for port %d", port);
+        }
+
         return tud_control_status(rhport, request);
     }
     default:

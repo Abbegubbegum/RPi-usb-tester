@@ -50,6 +50,7 @@ REQ_GET_PORT = 0x01  # IN:  u8 port
 REQ_SET_PORT = 0x02  # OUT: wValue = port
 REQ_GET_POWER = 0x03  # IN:  power report blob
 REQ_GET_ADC_SAMPLES = 0x04  # Trigger bulk transfer of ADC samples
+REQ_SET_PORT_PASSED = 0x05  # OUT: wValue = port (turns on pass LED)
 REQ_GET_PORTMAP = 0x10  # IN:  bitmask of available ports
 
 TEST_SECS = 3.0
@@ -115,6 +116,11 @@ def set_port_and_reopen(dev, intf_num, port):
     dev = find_device()
     intf_num = find_vendor_interface(dev).bInterfaceNumber
     return dev
+
+
+def set_port_passed(dev, intf_num, port):
+    """Turn on the pass LED for the specified port."""
+    ctrl_out(dev, REQ_SET_PORT_PASSED, intf_num, port)
 
 # ---------------------- Bulk loopback ----------------------
 
@@ -474,6 +480,14 @@ def main():
         res["pass"] = passed
         res["fail_reasons"] = reasons
         res["rollup"] = rollup
+
+        # Turn on pass LED if port passed
+        if passed:
+            try:
+                set_port_passed(dev, intf_num, p)
+            except Exception as e:
+                # Don't fail the test if LED control fails
+                print(f"  Warning: Failed to set pass LED for port {p}: {e}")
 
         summary_obj["tested_ports"].append(p)
         summary_obj["per_port"].append(res)

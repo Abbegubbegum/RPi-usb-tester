@@ -41,6 +41,11 @@ enum
 static const uint8_t PORT_VBUS_SWITCH_PINS[] = {
     0, 11, 10, 9};
 
+static const uint8_t PORT_PASSED_LED_PINS[] = {
+    18, 19, 20, 21};
+
+#define BUZZER_EN_PIN 5
+
 #define VBUS_ADC_PIN 26
 #define VBUS_ADC_CHAN 0
 #define VBUS_DIV_R1 68u
@@ -67,6 +72,8 @@ static const uint8_t PORT_VBUS_SWITCH_PINS[] = {
 
 #define UNDERVOLT_LIMIT_IDLE_MV 4800 // Minimum VBUS to consider port functional
 #define UNDERVOLT_LIMIT_LOAD_MV 4000 // Limit for the drop during load, more lenient because of resistance in load path
+
+#define VBUS_CHECK_INTERVAL_MS 1000 // Check for new ports every 1 second
 
 //  ========= TYPES =============
 typedef struct __attribute__((packed))
